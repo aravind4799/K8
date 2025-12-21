@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: back-end
+spec:
+  type: ClusterIP        # Default type - can be omitted
+  ports:
+  - targetPort: 80       # Port on the pod/container where the app is running
+    port: 80             # Port on the Service (ClusterIP) - used for internal cluster communication
+  selector:
+    app: myapp           # Must match labels in pod YAML
+    type: back-end       # Must match labels in pod YAML
+
