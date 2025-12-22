@@ -10,6 +10,7 @@
   - [Lifecycle & Manifests](#lifecycle--manifests)
   - [Editing Pods](#editing-pods)
   - [Commands and Arguments (Docker vs Kubernetes)](#commands-and-arguments-docker-vs-kubernetes)
+  - [Resource Requests and Limits](#resource-requests-and-limits)
 - [ReplicaSets](#replicasets)
   - [Overview](#overview)
   - [Manifest Examples](#manifest-examples)
@@ -31,8 +32,12 @@
   - [NodePort Service](#nodeport-service)
   - [Service Manifest Example](#service-manifest-example)
   - [Basic Commands](#basic-commands-3)
-- [Environment Variables](#environment-variables)
-  - [ConfigMaps](#configmaps)
+- [Security](#security)
+  - [Security Context](#security-context)
+  - [Environment Variables](#environment-variables)
+    - [ConfigMaps](#configmaps)
+    - [Secrets](#secrets)
+    - [CSI Drivers to Manage Secrets](#csi-drivers-to-manage-secrets)
 
 ---
 
@@ -359,6 +364,562 @@ CMD ["5"]             # Maps to Kubernetes 'args'
 - If you don't specify `args`, the image's CMD is used (or no args if only ENTRYPOINT exists)
 - You can override either or both fields independently
 - This is equivalent to Docker's `--entrypoint` flag and runtime arguments
+
+### Resource Requests and Limits
+
+*Kubernetes allows you to specify both resource requests and limits for containers. These help the scheduler place pods and prevent resource exhaustion.*
+
+**Requests vs Limits:**
+
+- **Requests**: Minimum resources guaranteed to the container (used by scheduler)
+- **Limits**: Maximum resources the container can use (enforced by kubelet)
+
+**Example Pod with Resource Requests and Limits:**
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: simple-webapp-color
+  labels:
+    name: simple-webapp-color
+spec:
+  containers:
+  - name: simple-webapp-color
+    image: simple-webapp-color
+    ports:
+    - containerPort: 8080
+    resources:
+      requests:
+        memory: "1Gi"    # Minimum memory guaranteed
+        cpu: 2            # Minimum CPU guaranteed
+      limits:
+        memory: "2Gi"     # Maximum memory allowed
+        cpu: 2            # Maximum CPU allowed
+```
+
+**Key points:**
+- `resources.requests` specifies the minimum resources required (used by scheduler)
+- `resources.limits` specifies the maximum resources allowed (enforced at runtime)
+- Requests help the scheduler find a suitable node
+- Limits prevent containers from consuming too many resources
+- If limits are exceeded, the container may be throttled (CPU) or terminated (memory)
+
+**How kube-scheduler Uses Resource Requests:**
+
+1. **Pod Creation**: When a pod is created with resource requests, the kube-scheduler receives the scheduling request
+2. **Node Evaluation**: The kube-scheduler evaluates all nodes in the cluster to find one with sufficient available resources
+3. **Resource Check**: For each node, it checks if:
+   - Available CPU ≥ requested CPU
+   - Available Memory ≥ requested Memory
+4. **Scheduling Decision**:
+   - **If resources are available**: The pod is scheduled to that node and starts running
+   - **If no node has sufficient resources**: The pod remains in `Pending` state until resources become available
+
+**Note:** The scheduler only considers `requests`, not `limits`, when making scheduling decisions.
+
+**How Resource Limits Are Enforced:**
+
+*Once a pod is running, the kubelet on the node enforces resource limits. The behavior differs significantly between CPU and memory:*
+
+#### What Happens When a Pod Exceeds CPU Limit
+
+*When a container tries to consume more CPU than its limit:*
+
+1. **CPU Throttling**: The container's CPU usage is throttled (restricted) to stay within the limit
+2. **No Termination**: The container **continues running** - it is NOT terminated
+3. **Performance Impact**: The application may run slower because it cannot use more CPU than allowed
+4. **Graceful Handling**: CPU is a "compressible" resource - Kubernetes can restrict it without killing the process
+
+**Example:**
+- Container has CPU limit: `2` cores
+- Container tries to use: `3` cores
+- **Result**: Container is throttled to use maximum `2` cores, continues running but may be slower
+
+**Checking CPU Throttling:**
+```bash
+kubectl top pod <pod-name>
+# Shows actual CPU usage vs limits
+```
+
+#### What Happens When a Pod Exceeds Memory Limit
+
+*When a container tries to consume more memory than its limit:*
+
+1. **OOMKilled**: The container is **terminated** by the kernel with status `OOMKilled` (Out Of Memory)
+2. **Pod Restart**: If the pod has a restart policy, Kubernetes will attempt to restart the container
+3. **No Graceful Handling**: Memory is a "non-compressible" resource - once allocated, it cannot be easily reclaimed
+4. **Immediate Action**: The termination happens immediately when memory limit is exceeded
+
+**Example:**
+- Container has memory limit: `1Gi`
+- Container tries to use: `1.5Gi`
+- **Result**: Container is terminated with `OOMKilled` status, pod may restart if configured
+
+**Checking Memory Issues:**
+```bash
+kubectl describe pod <pod-name>
+# Look for events showing OOMKilled
+kubectl get pod <pod-name>
+# Status will show "OOMKilled" or "CrashLoopBackOff" if restarting
+```
+
+**Key Differences:**
+
+| Resource | Behavior When Limit Exceeded | Container Status | Can Recover? |
+|----------|----------------------------|------------------|--------------|
+| **CPU** | Throttled (restricted) | Continues running | Yes - automatically throttled |
+| **Memory** | Terminated (OOMKilled) | Terminated | Yes - if restart policy allows |
+
+**Important Notes:**
+- **CPU**: Compressible resource - can be throttled without termination
+- **Memory**: Non-compressible resource - must be terminated if limit exceeded
+- **Enforcement**: Both are enforced by the kubelet on the node, not the scheduler
+- **Monitoring**: Always monitor resource usage to avoid unexpected throttling or terminations
+
+**What Happens When Resources Are Not Available:**
+
+*If the kube-scheduler cannot find a node with sufficient resources:*
+- The pod status remains `Pending`
+- The pod will not be scheduled to any node
+- The pod waits until:
+  - A node with sufficient resources becomes available (e.g., other pods are terminated, nodes are added)
+  - Resources are freed up on existing nodes
+
+**Checking Pod Status:**
+
+```bash
+kubectl get pods
+```
+
+*If a pod is stuck in `Pending` state, you can check why:*
+
+```bash
+kubectl describe pod <pod-name>
+```
+
+*Look for events or conditions that indicate resource constraints, such as:*
+- `Insufficient cpu`
+- `Insufficient memory`
+- `0/3 nodes are available: 3 Insufficient cpu`
+
+**Resource Request Formats:**
+
+| Resource | Format | Example |
+|----------|--------|---------|
+| **CPU** | Integer or millicores | `cpu: 2` or `cpu: "2000m"` |
+| **Memory** | Bytes, KiB, Mi, Gi, etc. | `memory: "4Gi"` or `memory: "512Mi"` |
+
+**Common Memory Units:**
+- `Ki` - Kibibytes (1024 bytes)
+- `Mi` - Mebibytes (1024 KiB)
+- `Gi` - Gibibytes (1024 Mi)
+- `Ti` - Tebibytes (1024 Gi)
+
+**Common CPU Formats:**
+- `1` = 1 CPU core
+- `"1000m"` = 1000 millicores = 1 CPU core
+- `"500m"` = 0.5 CPU cores
+- `2` = 2 CPU cores
+
+**Requests vs Limits - Key Differences:**
+
+| Aspect | Requests | Limits |
+|--------|----------|--------|
+| **Purpose** | Minimum resources guaranteed | Maximum resources allowed |
+| **Used By** | kube-scheduler (for scheduling) | kubelet (for enforcement) |
+| **Enforcement** | Guaranteed availability | Hard limit enforcement |
+| **CPU Exceeded** | N/A (guaranteed minimum) | Container gets throttled |
+| **Memory Exceeded** | N/A (guaranteed minimum) | Container may be terminated (OOMKilled) |
+| **Scheduling** | Required for scheduling decision | Not considered by scheduler |
+
+### LimitRange
+
+*LimitRange is a Kubernetes resource that sets default resource requests and limits for containers in a namespace. It ensures that all containers have resource constraints defined, even if they're not explicitly specified in the pod definition.*
+
+**What LimitRange Does:**
+- Sets **default** resource limits and requests for containers
+- Sets **minimum** and **maximum** resource constraints
+- **Applies to newer pods** being created in the namespace
+- Validates that pod resource specifications fall within the defined range
+
+**Creating a LimitRange:**
+
+**Example - CPU LimitRange:**
+
+```yaml
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: cpu-resource-constraint
+spec:
+  limits:
+  - default:
+      cpu: 500m        # Default limit (applied if not specified)
+    defaultRequest:
+      cpu: 500m        # Default request (applied if not specified)
+    max:
+      cpu: "1"         # Maximum CPU allowed
+    min:
+      cpu: 100m        # Minimum CPU required
+    type: Container
+```
+
+**Example - Memory LimitRange:**
+
+```yaml
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: memory-resource-constraint
+spec:
+  limits:
+  - default:
+      memory: 1Gi      # Default limit (applied if not specified)
+    defaultRequest:
+      memory: 1Gi      # Default request (applied if not specified)
+    max:
+      memory: 1Gi      # Maximum memory allowed
+    min:
+      memory: 500Mi    # Minimum memory required
+    type: Container
+```
+
+**LimitRange Fields Explained:**
+
+| Field | Description | Applies To |
+|-------|-------------|------------|
+| **`default`** | Default resource **limit** applied to containers that don't specify limits | Limits |
+| **`defaultRequest`** | Default resource **request** applied to containers that don't specify requests | Requests |
+| **`max`** | Maximum resource **limit** allowed - containers cannot exceed this | Limits |
+| **`min`** | Minimum resource **request** required - containers must request at least this | Requests |
+| **`type`** | Scope of the limit range - `Container`, `Pod`, or `PersistentVolumeClaim` | All |
+
+**How LimitRange Works:**
+
+1. **Default Values**: If a pod is created without specifying `resources.requests` or `resources.limits`, the LimitRange `defaultRequest` and `default` values are automatically applied
+2. **Validation**: If a pod specifies resources, they must fall within the `min` and `max` constraints
+3. **Namespace Scope**: LimitRange applies to all pods created in the namespace where it's defined
+4. **New Pods Only**: LimitRange **applies to newer pods being created** - existing pods are not affected
+
+**Example Scenario:**
+
+*If you create a LimitRange with:*
+- `default: cpu: 500m` and `defaultRequest: cpu: 500m`
+- `min: cpu: 100m` and `max: cpu: "1"`
+
+*And then create a pod without specifying resources:*
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: my-pod
+spec:
+  containers:
+  - name: app
+    image: nginx
+    # No resources specified
+```
+
+*Kubernetes will automatically apply:*
+- `resources.requests.cpu: 500m` (from `defaultRequest`)
+- `resources.limits.cpu: 500m` (from `default`)
+
+**Creating a LimitRange:**
+
+```bash
+kubectl create -f limit-range-cpu.yaml
+kubectl create -f limit-range-memory.yaml
+```
+
+**Viewing LimitRanges:**
+
+```bash
+kubectl get limitrange
+# or
+kubectl get limits
+```
+
+**Describing a LimitRange:**
+
+```bash
+kubectl describe limitrange cpu-resource-constraint
+```
+
+### ResourceQuotas
+
+*ResourceQuotas define hard restrictions on resource consumption for a namespace. Unlike LimitRange which applies to individual containers, ResourceQuotas set aggregate limits for all resources in a namespace across multiple nodes.*
+
+**What ResourceQuotas Do:**
+- Set **hard limits** on total resource consumption in a namespace
+- Apply to **all pods** in the namespace combined (aggregate limits)
+- **Span across multiple nodes** - quotas are namespace-wide, not node-specific
+- Prevent a namespace from consuming more than its allocated share of cluster resources
+
+**Creating a ResourceQuota:**
+
+**Example ResourceQuota:**
+
+```yaml
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: my-resource-quota
+spec:
+  hard:
+    requests.cpu: 4        # Total CPU requests across all pods
+    requests.memory: 4Gi   # Total memory requests across all pods
+    limits.cpu: 10         # Total CPU limits across all pods
+    limits.memory: 10Gi    # Total memory limits across all pods
+```
+
+**ResourceQuota Fields Explained:**
+
+| Field | Description | Example |
+|-------|-------------|---------|
+| **`requests.cpu`** | Total CPU requests allowed across all pods in namespace | `requests.cpu: 4` |
+| **`requests.memory`** | Total memory requests allowed across all pods in namespace | `requests.memory: 4Gi` |
+| **`limits.cpu`** | Total CPU limits allowed across all pods in namespace | `limits.cpu: 10` |
+| **`limits.memory`** | Total memory limits allowed across all pods in namespace | `limits.memory: 10Gi` |
+
+**How ResourceQuotas Work:**
+
+1. **Namespace Scope**: ResourceQuota applies to the entire namespace where it's created
+2. **Aggregate Limits**: Limits are calculated by summing resources from **all pods** in the namespace
+3. **Cross-Node**: Resources are counted across **all nodes** - pods can be on different nodes
+4. **Hard Restrictions**: When the quota is reached, **no new pods can be created** that would exceed the quota
+5. **Validation**: Kubernetes validates resource requests/limits against the quota before allowing pod creation
+
+**Example Scenario:**
+
+*If you create a ResourceQuota with:*
+- `requests.cpu: 4`
+- `requests.memory: 4Gi`
+- `limits.cpu: 10`
+- `limits.memory: 10Gi`
+
+*And you have pods in the namespace:*
+- Pod 1: `requests.cpu: 1`, `requests.memory: 1Gi`
+- Pod 2: `requests.cpu: 2`, `requests.memory: 2Gi`
+- Pod 3: `requests.cpu: 1`, `requests.memory: 1Gi`
+
+*Total used:*
+- `requests.cpu: 4` (1 + 2 + 1) ✅ Within quota
+- `requests.memory: 4Gi` (1Gi + 2Gi + 1Gi) ✅ Within quota
+
+*If you try to create Pod 4 with `requests.cpu: 1`:*
+- Total would be: `requests.cpu: 5` ❌ **Exceeds quota - pod creation will be denied**
+
+**Creating a ResourceQuota:**
+
+```bash
+kubectl create -f resource-quota.yaml
+```
+
+**Or create imperatively:**
+
+```bash
+kubectl create quota my-resource-quota \
+  --hard=requests.cpu=4,requests.memory=4Gi,limits.cpu=10,limits.memory=10Gi \
+  --namespace=my-namespace
+```
+
+**Viewing ResourceQuotas:**
+
+```bash
+kubectl get resourcequota
+# or shorthand
+kubectl get quota
+```
+
+**Viewing ResourceQuota details:**
+
+```bash
+kubectl describe resourcequota my-resource-quota
+```
+
+*This shows:*
+- The hard limits set
+- Current usage (how much of the quota is consumed)
+- Remaining quota
+
+**ResourceQuota vs LimitRange:**
+
+| Aspect | ResourceQuota | LimitRange |
+|--------|---------------|------------|
+| **Scope** | Namespace-wide (all pods combined) | Individual containers |
+| **Purpose** | Set aggregate limits for namespace | Set defaults/constraints per container |
+| **Level** | Namespace level | Container/Pod level |
+| **Enforcement** | Prevents namespace from exceeding total quota | Sets defaults and validates per-container resources |
+| **Cross-Node** | Yes - spans across all nodes | No - applies to individual containers |
+
+**Important Notes:**
+- **Hard Restrictions**: ResourceQuotas are hard limits - they cannot be exceeded
+- **Namespace Isolation**: Prevents one namespace from consuming all cluster resources
+- **Multi-Node**: Quotas span across all nodes - pods can be distributed anywhere
+- **Aggregate Calculation**: All pod resources in the namespace are summed together
+- **Pod Creation**: New pods are rejected if they would cause the namespace to exceed its quota
+- **Existing Pods**: ResourceQuotas apply to all pods in the namespace, including existing ones
+- **Requests**: Kubernetes guarantees that the requested resources are available on the node
+- **Limits**: Prevent containers from consuming more than specified, protecting other pods on the node
+- **Overcommitment**: Nodes can have pods with total requests exceeding node capacity (but limits prevent overuse)
+- **Pending State**: Pods in Pending state are waiting for resources - this is normal behavior when cluster is at capacity
+- **Best Practice**: Always set both requests and limits to ensure proper scheduling and resource protection
+- **Equal Values**: You can set requests and limits to the same value for guaranteed resources
+
+## Security
+
+### Security Context
+
+*Security Context defines privilege and access control settings for a Pod or Container. It allows you to control various security-related aspects like user IDs, capabilities, and permissions.*
+
+**Docker vs Kubernetes:**
+
+| Docker Command | Kubernetes Pod Field |
+|---------------|---------------------|
+| `docker run --user=1001 ubuntu sleep 3600` | `securityContext.runAsUser: 1001` |
+| `docker run --cap-add MAC_ADMIN ubuntu` | `securityContext.capabilities.add: ["MAC_ADMIN"]` |
+
+**Security Context Levels:**
+
+Security Context can be configured at two levels:
+1. **Pod Level** - `spec.securityContext` - Applies to all containers in the pod
+2. **Container Level** - `spec.containers[].securityContext` - Applies to a specific container
+
+**Important Rule:**
+- **Pod level configuration overrides container level configuration** for settings that can be set at both levels
+- However, some settings (like capabilities) can **only** be set at the container level
+
+#### Pod Level Security Context
+
+*Configure security settings that apply to all containers in the pod.*
+
+**Example - Pod Level:**
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: web-pod
+spec:
+  securityContext:
+    runAsUser: 1000
+  containers:
+  - name: ubuntu
+    image: ubuntu
+    command: ["sleep", "3600"]
+```
+
+**Key points:**
+- `spec.securityContext` applies to all containers in the pod
+- `runAsUser: 1000` sets the user ID that all containers will run as
+- This overrides the default user from the container image
+
+#### Container Level Security Context
+
+*Configure security settings for a specific container. Move the security context into the container definition for container-level security.*
+
+**Example - Container Level:**
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: web-pod
+spec:
+  containers:
+  - name: ubuntu
+    image: ubuntu
+    command: ["sleep", "3600"]
+    securityContext:
+      runAsUser: 1000
+```
+
+**Key points:**
+- `spec.containers[].securityContext` applies only to that specific container
+- Container-level settings can be overridden by pod-level settings (if both are specified)
+- Each container can have its own security context
+
+#### Combining Pod and Container Level
+
+*When both pod-level and container-level security contexts are specified, pod-level settings override container-level settings.*
+
+**Example:**
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: web-pod
+spec:
+  securityContext:
+    runAsUser: 1000  # Pod level - applies to all containers
+  containers:
+  - name: ubuntu
+    image: ubuntu
+    command: ["sleep", "3600"]
+    securityContext:
+      runAsUser: 2000  # Container level - but will be overridden by pod level (1000)
+```
+
+*In this case, the container will run as user 1000 (pod level), not 2000 (container level).*
+
+#### Capabilities (Container Level Only)
+
+*Linux capabilities allow fine-grained control over what privileges a process can use. Capabilities can **only** be configured at the container level, not at the pod level.*
+
+**Example - Adding Capabilities:**
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: web-pod
+spec:
+  containers:
+  - name: ubuntu
+    image: ubuntu
+    command: ["sleep", "3600"]
+    securityContext:
+      runAsUser: 1000
+      capabilities:
+        add: ["MAC_ADMIN"]
+```
+
+**Key points:**
+- `capabilities` can **only** be set at `spec.containers[].securityContext`, not at pod level
+- `capabilities.add` adds specific capabilities to the container
+- `capabilities.drop` removes capabilities (drops all by default, then adds back what you specify)
+- Common capabilities include: `NET_ADMIN`, `SYS_ADMIN`, `MAC_ADMIN`, etc.
+
+**Example - Dropping Capabilities:**
+
+```yaml
+securityContext:
+  capabilities:
+    drop: ["ALL"]  # Drop all capabilities
+    add: ["NET_BIND_SERVICE"]  # Then add only what's needed
+```
+
+**Common Security Context Settings:**
+
+| Setting | Pod Level | Container Level | Description |
+|---------|-----------|----------------|-------------|
+| `runAsUser` | ✅ | ✅ | User ID to run as (pod level overrides container) |
+| `runAsGroup` | ✅ | ✅ | Group ID to run as |
+| `runAsNonRoot` | ✅ | ✅ | Require non-root user |
+| `fsGroup` | ✅ | ❌ | Group ID for volumes |
+| `capabilities` | ❌ | ✅ | Linux capabilities (container level only) |
+| `privileged` | ❌ | ✅ | Run container in privileged mode |
+| `readOnlyRootFilesystem` | ❌ | ✅ | Mount root filesystem as read-only |
+
+**Best Practices:**
+
+1. **Run as non-root**: Always use `runAsNonRoot: true` or specify a non-root `runAsUser`
+2. **Drop all capabilities**: Start with `capabilities.drop: ["ALL"]` and add only what's needed
+3. **Read-only root filesystem**: Use `readOnlyRootFilesystem: true` when possible
+4. **Least privilege**: Grant only the minimum permissions and capabilities required
+5. **Container-level for capabilities**: Remember that capabilities can only be set at container level
 
 ## ReplicaSets
 
@@ -797,7 +1358,7 @@ k get pods -l app=myapp,type=front-end
 ```
 *This uses the same label selector that the service uses to find matching pods.*
 
-## Environment Variables
+### Environment Variables
 
 *Environment variables in Kubernetes Pods allow you to pass configuration data to containers. The `env` field is an array that contains environment variable definitions, each with a `name` and a `value` (or `valueFrom` for external sources).*
 
@@ -1114,3 +1675,287 @@ spec:
 - **envFrom**: When you want all ConfigMap values as environment variables
 - **Single ENV (valueFrom)**: When you need selective injection or custom environment variable names
 - **Volume**: When your application expects configuration files rather than environment variables
+
+### Secrets
+
+*Secrets are used to store sensitive data like passwords, API keys, tokens, and certificates. Unlike ConfigMaps which store plain text, Secrets store base64-encoded data (though Kubernetes handles encoding/decoding automatically).*
+
+**Why use Secrets:**
+- Store sensitive information securely
+- Separate sensitive data from application code
+- Share secrets across multiple pods
+- Base64 encoding provides basic obfuscation (not encryption - for production, use external secret management)
+
+**Encoding Secrets with base64:**
+
+*Before storing secrets in a Secret manifest, you need to encode them using base64:*
+
+```bash
+echo -n "password123" | base64
+# Output: cGFzc3dvcmQxMjM=
+```
+
+**Key points:**
+- Use `echo -n` to avoid adding a newline character
+- The encoded value is what you store in the Secret manifest
+- Kubernetes automatically decodes the value when injecting it into pods
+- Base64 encoding is NOT encryption - it's just encoding (obfuscation)
+
+**Example Secret Manifest:**
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: app-secret
+data:
+  DB_PASSWORD: cGFzc3dvcmQxMjM=  # base64 encoded "password123"
+  API_KEY: bXlhcGlrZXk=           # base64 encoded "myapikey"
+```
+
+**Create the Secret from YAML:**
+```bash
+kubectl create -f secret.yaml
+```
+
+**Or create imperatively:**
+```bash
+kubectl create secret generic app-secret --from-literal=DB_PASSWORD=password123
+```
+
+### Viewing Secrets
+
+**List all Secrets:**
+```bash
+k get secrets
+# or shorthand
+k get secret
+```
+
+**Get detailed information about a Secret:**
+```bash
+k describe secret <secret-name>
+```
+
+*Note: The actual values are not shown in `kubectl describe` for security reasons. Use `kubectl get secret <name> -o yaml` to see the base64-encoded values.*
+
+### Injecting Secrets into Pods
+
+**Just like ConfigMaps, there are 3 different ways to inject Secrets into Pods:**
+
+#### Method 1: Using envFrom (Inject All Key-Value Pairs)
+
+*Inject all key-value pairs from a Secret as environment variables. This is useful when you want all secret values from a Secret to be available as environment variables.*
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: app-pod
+spec:
+  containers:
+  - name: app-container
+    image: myapp:latest
+    ports:
+    - containerPort: 8080
+    envFrom:
+    - secretRef:
+        name: app-secret
+```
+
+**Key points:**
+- `envFrom` is an array that can contain multiple Secret references
+- Use `secretRef` (instead of `configMapRef` for ConfigMaps)
+- `name` is the Secret name
+- All key-value pairs in the Secret become environment variables
+- Each key becomes an environment variable name
+- Each value becomes the environment variable value (automatically decoded from base64)
+- Useful when you want to inject entire Secrets
+
+#### Method 2: Using Single Environment Variable with valueFrom
+
+*Inject a specific key's value from a Secret as a single environment variable. This gives you granular control over which Secret keys to use.*
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: app-pod
+spec:
+  containers:
+  - name: app-container
+    image: myapp:latest
+    ports:
+    - containerPort: 8080
+    env:
+    - name: DB_PASSWORD
+      valueFrom:
+        secretKeyRef:
+          name: app-secret    # Secret name
+          key: DB_PASSWORD   # Specific key in the Secret
+```
+
+**Key points:**
+- Use `env` array with `valueFrom.secretKeyRef`
+- `name` in `env` is the environment variable name in the container
+- `secretKeyRef.name` is the Secret name
+- `secretKeyRef.key` is the specific key to retrieve from the Secret
+- The value is automatically decoded from base64 when injected
+- You can use multiple `env` entries to inject multiple specific keys
+
+#### Method 3: Using Volumes
+
+*Mount a Secret as a volume. Each key in the Secret becomes a file, and the value becomes the file's content. Useful when applications expect secret files (like certificates or keys) rather than environment variables.*
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: app-pod
+spec:
+  containers:
+  - name: app-container
+    image: myapp:latest
+    ports:
+    - containerPort: 8080
+    volumeMounts:
+    - name: app-secret-volume
+      mountPath: /etc/secrets
+  volumes:
+  - name: app-secret-volume
+    secret:
+      secretName: app-secret
+```
+
+**Key points:**
+- Define a volume using `volumes` array with `secret` source
+- Use `secret.secretName` to specify the Secret name
+- Mount the volume using `volumeMounts` in the container spec
+- Each key in the Secret becomes a file in the mounted directory
+- Each value becomes the content of that file (automatically decoded from base64)
+- Useful for applications that read secrets from files (e.g., SSL certificates, private keys)
+- Mount path (e.g., `/etc/secrets`) is where the files will appear in the container
+
+**Summary of the three methods:**
+
+| Method | Field | Use Case |
+|--------|-------|----------|
+| **envFrom** | `envFrom.secretRef` | Inject all key-value pairs as environment variables |
+| **Single ENV** | `env[].valueFrom.secretKeyRef` | Inject specific keys as individual environment variables |
+| **Volume** | `volumes[].secret` + `volumeMounts` | Mount Secret as files in the container |
+
+**When to use each:**
+- **envFrom**: When you want all Secret values as environment variables
+- **Single ENV (valueFrom)**: When you need selective injection or custom environment variable names
+- **Volume**: When your application expects secret files (certificates, keys) rather than environment variables
+
+**Important Security Notes:**
+- Secrets are base64-encoded, NOT encrypted
+- Anyone with access to the Secret can decode the values
+- For production environments, consider using external secret management solutions
+- Never commit Secret manifests with real credentials to version control
+- Use RBAC to restrict access to Secrets
+
+#### CSI Drivers to Manage Secrets
+
+##### Why Native Kubernetes Secrets Are Insufficient for Production
+
+*Native Kubernetes Secrets have significant limitations for production use:*
+- **Base64 encoding is NOT encryption** - it's just obfuscation, not real encryption
+- Secrets are stored in etcd (Kubernetes' database) without encryption by default
+- Anyone with cluster access can easily decode and view secret values
+- No automatic rotation or versioning capabilities
+- No integration with enterprise secret management systems
+
+*For production environments, you need proper encryption and integration with external secret management systems.*
+
+##### External Secret Management Solutions
+
+*Several tools integrate Kubernetes with external secret management systems:*
+- **Secret Store CSI Driver** (Preferred method)
+- **External Secrets Operator (ESO)**
+- **Sealed Secrets**
+- **HashiCorp Vault**
+- **AWS Secrets Manager integration**
+- And other external secret management solutions
+
+###### Secret Store CSI Driver (Preferred Method)
+
+*The Secret Store CSI Driver is the preferred solution for managing secrets in production. It provides a Container Storage Interface (CSI) driver that synchronizes secrets from external secret management stores directly into Kubernetes pods via volume mounts.*
+
+**Key Advantages:**
+- **No Kubernetes Secret Objects**: Secrets never touch Kubernetes etcd - they're synced directly from external stores
+- **Volume Mount Integration**: Uses standard Kubernetes volume mounts, making it transparent to applications
+- **Multiple Providers**: Supports AWS Secrets Manager, HashiCorp Vault, Azure Key Vault, Google Secret Manager, and more
+- **Automatic Sync**: Secrets are automatically synchronized from external stores when mounted
+- **Better Security**: Secrets are encrypted at rest in the external secret management system
+
+**How Secret Store CSI Driver Works - Architecture Flow:**
+
+1. **User/Helm Deployment**: A user deploys a Custom Resource Definition (CRD) called `SecretProviderClass` using Helm or kubectl
+2. **SecretProviderClass CRD**: Defines which external secrets to fetch and how to access them (from AWS Secrets Manager, HashiCorp Vault, Azure Key Vault, etc.)
+3. **Kubelet**: The Kubelet on the node recognizes the need for secrets defined in the SecretProviderClass
+4. **CSI Driver**: The Container Storage Interface (CSI) Driver intercepts the volume mount request
+5. **Secret Provider**: The Secret Provider component communicates with the external secret management store (e.g., AWS Secrets Manager, HashiCorp Vault)
+6. **Secret Retrieval**: Secrets are retrieved from the external store (e.g., `DB_PASSWORD: mypass`, `DB_USERNAME: myuser`)
+7. **Volume Mount**: The CSI Driver mounts the retrieved secrets as files in the pod via a volume mount
+8. **Pod Access**: The pod can access secrets from the mounted volume at the specified mount path
+
+**How Pods Use Secrets:**
+- The pod defines a volume mount that references a `SecretProviderClass`
+- The CSI Driver retrieves secrets from the external secret management store
+- Secrets are mounted as files in the pod at the specified mount path (e.g., `/mnt/secrets-store`)
+- The pod can read secrets from these mounted files
+- Secrets never appear in Kubernetes Secret objects or etcd
+
+**Supported External Secret Stores:**
+- AWS Secrets Manager
+- HashiCorp Vault
+- Azure Key Vault
+- Google Secret Manager
+- IBM Cloud Secrets Manager
+- And more...
+
+######### External Secrets Operator (ESO)
+
+*External Secrets Operator is another approach that syncs secrets from external stores into Kubernetes Secret objects. Unlike CSI Driver which mounts directly, ESO creates Kubernetes Secret resources that can then be used by pods.*
+
+**How ESO Works:**
+1. ESO watches for `ExternalSecret` custom resources
+2. Retrieves secrets from external stores (AWS Secrets Manager, HashiCorp Vault, etc.)
+3. Creates or updates Kubernetes Secret objects
+4. Pods can then use these Secrets normally (via env vars, volumes, etc.)
+
+**Key Difference from CSI Driver:**
+- **CSI Driver**: Mounts secrets directly as files, no Kubernetes Secret objects created
+- **ESO**: Creates Kubernetes Secret objects from external stores, which pods then use with standard Secret injection methods
+
+**Comparison: CSI Driver vs External Secrets Operator**
+
+| Feature | Secret Store CSI Driver | External Secrets Operator |
+|---------|------------------------|--------------------------|
+| **Storage** | Secrets never in etcd | Creates Kubernetes Secret objects in etcd |
+| **Mount Method** | Volume mounts directly | Standard Secret injection methods (env vars, volumes) |
+| **Sync Direction** | Direct from external store → Pod | External store → Secret → Pod |
+| **Use Case** | When you want secrets completely out of Kubernetes | When you need standard Secret objects |
+| **Security** | Higher - secrets never stored in Kubernetes | Lower - secrets stored as Secret objects |
+
+### Best Practices for Production Secret Management
+
+1. **Use External Secret Management**: Never store sensitive data directly in Kubernetes Secrets
+2. **Enable Encryption at Rest**: Ensure etcd encryption is enabled (for any Secrets that do exist)
+3. **RBAC**: Implement strict RBAC policies to limit access to Secrets
+4. **Secret Rotation**: Use external stores that support automatic secret rotation
+5. **Audit Logging**: Enable audit logging for secret access
+6. **Network Policies**: Use network policies to restrict pod-to-pod communication
+7. **Prefer CSI Driver**: Use Secret Store CSI Driver for production as it keeps secrets out of etcd entirely
+
+##### Summary
+
+*For production environments, native Kubernetes Secrets are insufficient. Use external secret management solutions like Secret Store CSI Driver or External Secrets Operator to:*
+- Keep secrets encrypted in external secret management systems
+- Avoid storing secrets in Kubernetes etcd (or minimize exposure if using ESO)
+- Enable automatic rotation and versioning
+- Integrate with enterprise secret management systems
+- Maintain better security and compliance
+- Meet regulatory requirements for secret management
