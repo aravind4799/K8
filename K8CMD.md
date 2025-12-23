@@ -2,15 +2,23 @@
 
 ## Table of Contents
 
+### Getting Started
 - [Environment Setup](#environment-setup)
 - [Helper/Utility Commands](#helperutility-commands)
+
+### Core Resources
 - [Pods](#pods)
   - [Basic Commands](#basic-commands)
   - [Inspection & Architecture](#inspection--architecture)
   - [Lifecycle & Manifests](#lifecycle--manifests)
   - [Editing Pods](#editing-pods)
   - [Commands and Arguments (Docker vs Kubernetes)](#commands-and-arguments-docker-vs-kubernetes)
-  - [Resource Requests and Limits](#resource-requests-and-limits)
+  - [Multi-Container Pods](#multi-container-pods)
+    - [Overview](#overview-multi-container)
+    - [Pod Restart Behavior](#pod-restart-behavior)
+    - [Init Containers](#init-containers)
+    - [Sidecar Containers](#sidecar-containers)
+    - [Co-Located Containers](#co-located-containers)
 - [ReplicaSets](#replicasets)
   - [Overview](#overview)
   - [Manifest Examples](#manifest-examples)
@@ -20,26 +28,85 @@
 - [Kubernetes Deployments](#kubernetes-deployments)
   - [Overview](#overview-1)
   - [Basic Commands](#basic-commands-2)
-- [Namespaces](#namespaces)
-  - [Built-in Namespaces](#built-in-namespaces)
-  - [Creating Namespaces](#creating-namespaces)
-  - [Working with Namespaces](#working-with-namespaces)
-  - [Service Discovery](#service-discovery)
-  - [Resource Quotas](#resource-quotas)
+
+### Networking
 - [Services](#services)
   - [Overview](#overview-2)
   - [ClusterIP Service](#clusterip-service)
   - [NodePort Service](#nodeport-service)
   - [Service Manifest Example](#service-manifest-example)
+  - [Creating Services Imperatively (Using kubectl expose)](#creating-services-imperatively-using-kubectl-expose)
   - [Basic Commands](#basic-commands-3)
-- [Security](#security)
-  - [Security Context](#security-context)
-  - [Environment Variables](#environment-variables)
-    - [ConfigMaps](#configmaps)
-    - [Secrets](#secrets)
-    - [CSI Drivers to Manage Secrets](#csi-drivers-to-manage-secrets)
+- [Namespaces](#namespaces)
+  - [Built-in Namespaces](#built-in-namespaces)
+  - [Creating Namespaces](#creating-namespaces)
+  - [Working with Namespaces](#working-with-namespaces)
+  - [Service Discovery](#service-discovery)
+
+### Resource Management
+- [Resource Requests and Limits](#resource-requests-and-limits)
+  - [What Happens When a Pod Exceeds CPU Limit](#what-happens-when-a-pod-exceeds-cpu-limit)
+  - [What Happens When a Pod Exceeds Memory Limit](#what-happens-when-a-pod-exceeds-memory-limit)
+- [LimitRange](#limitrange)
+- [ResourceQuotas](#resourcequotas)
+
+### Pod Scheduling and Node Selection
+- [Taints and Tolerations](#taints-and-tolerations)
+  - [Overview](#overview-4)
+  - [Taint Effects](#taint-effects)
+  - [Creating Taints](#creating-taints)
+  - [Tolerations](#tolerations)
+  - [Important Notes](#important-notes-taints-tolerations)
+  - [Basic Commands](#basic-commands-5)
+- [Node Labels](#node-labels)
+- [NodeSelector](#nodeselector)
+- [Node Affinity](#node-affinity)
+  - [Node Affinity Types](#node-affinity-types)
+  - [Operators](#operators)
+
+### Configuration Management
+- [Environment Variables](#environment-variables)
+  - [Plain Key-Value Format](#1-plain-key-value-format)
+  - [Using ConfigMaps](#2-using-configmaps)
+  - [Using Secrets](#3-using-secrets)
+- [ConfigMaps](#configmaps)
+  - [Creating ConfigMaps (Imperative Methods)](#creating-configmaps-imperative-methods)
+    - [Method 1: Using --from-literal](#method-1-using---from-literal)
+    - [Method 2: Using --from-file](#method-2-using---from-file)
+  - [Creating ConfigMaps (Declarative Method - YAML)](#creating-configmaps-declarative-method---yaml)
+  - [Viewing ConfigMaps](#viewing-configmaps)
+  - [Injecting ConfigMaps into Pods](#injecting-configmaps-into-pods)
+    - [Method 1: Using envFrom](#method-1-using-envfrom-inject-all-key-value-pairs)
+    - [Method 2: Using Single Environment Variable with valueFrom](#method-2-using-single-environment-variable-with-valuefrom)
+    - [Method 3: Using Volumes](#method-3-using-volumes)
+- [Secrets](#secrets)
+  - [Viewing Secrets](#viewing-secrets)
+  - [Injecting Secrets into Pods](#injecting-secrets-into-pods)
+    - [Method 1: Using envFrom](#method-1-using-envfrom-inject-all-key-value-pairs-1)
+    - [Method 2: Using Single Environment Variable with valueFrom](#method-2-using-single-environment-variable-with-valuefrom-1)
+    - [Method 3: Using Volumes](#method-3-using-volumes-1)
+  - [CSI Drivers to Manage Secrets](#csi-drivers-to-manage-secrets)
+  - [Best Practices for Production Secret Management](#best-practices-for-production-secret-management)
+
+### Security
+- [Security Context](#security-context)
+  - [Pod Level Security Context](#pod-level-security-context)
+  - [Container Level Security Context](#container-level-security-context)
+  - [Combining Pod and Container Level](#combining-pod-and-container-level)
+  - [Capabilities (Container Level Only)](#capabilities-container-level-only)
+- [Service Accounts](#service-accounts)
+  - [Overview](#overview-3)
+  - [Default Service Account](#default-service-account)
+  - [Creating Service Accounts](#creating-service-accounts)
+  - [Attaching Service Accounts to Pods](#attaching-service-accounts-to-pods)
+  - [Service Account Tokens](#service-account-tokens)
+  - [Dashboard Authentication Flow](#dashboard-authentication-flow)
+  - [Using Tokens for API Authentication](#using-tokens-for-api-authentication)
+  - [Basic Commands](#basic-commands-4)
 
 ---
+
+## Getting Started
 
 ## Environment Setup
 
@@ -364,6 +431,222 @@ CMD ["5"]             # Maps to Kubernetes 'args'
 - If you don't specify `args`, the image's CMD is used (or no args if only ENTRYPOINT exists)
 - You can override either or both fields independently
 - This is equivalent to Docker's `--entrypoint` flag and runtime arguments
+
+### Multi-Container Pods
+
+#### Overview {#overview-multi-container}
+
+*A Pod can contain multiple containers that share the same network namespace, storage, and lifecycle. There are three common patterns for multi-container Pods: Init Containers, Sidecar Containers, and Co-Located Containers.*
+
+**Key Concept:**
+- In a multi-container Pod, each container is expected to run a process that stays alive for the entire lifecycle of the Pod
+- All containers in a Pod share:
+  - Network namespace (same IP address, can communicate via localhost)
+  - Storage volumes
+  - Pod lifecycle
+
+**Three Patterns:**
+
+| Pattern | Purpose | Lifecycle |
+|---------|---------|-----------|
+| **Init Containers** | Run setup tasks before main containers start | Run to completion sequentially before main containers |
+| **Sidecar Containers** | Support main container (logging, monitoring, etc.) | Run alongside main containers for entire Pod lifecycle |
+| **Co-Located Containers** | Related containers working together | Run together, all expected to stay alive |
+
+#### Pod Restart Behavior
+
+*It's important to understand how restarts work in multi-container Pods:*
+
+**Key Points:**
+- If any **main container** (containers under `spec.containers`) exits and the Pod's `restartPolicy` is set to `Always` or `OnFailure`, **all containers in the Pod are restarted**
+- Kubernetes does **NOT restart individual containers** within a Pod
+- Kubernetes treats the Pod as a **single unit of execution** and restarts the entire Pod if needed
+- This applies only to **main containers**, not init containers
+- Init containers are always run to completion before main containers begin and are not restarted individually
+
+**Example Scenario:**
+- Pod has 2 containers: web application and logging agent
+- Both containers are expected to remain active throughout the Pod's lifecycle
+- If the web application container fails, the **entire Pod is restarted** (both containers restart)
+- The logging agent container must stay alive as long as the web application is running
+
+#### Init Containers
+
+*Init containers are special containers that run before the main containers in a Pod. They are used for setup tasks that must complete before the main application starts.*
+
+**Characteristics:**
+- Run **before** main containers start
+- Each init container must **succeed (exit 0)** before the next one is started
+- Run **sequentially** (one after another)
+- Once all init containers complete, **regular containers start simultaneously**
+- If any init container fails, the entire Pod is restarted and all init containers are rerun from the beginning
+- Init containers are configured in the `initContainers` section of the Pod spec
+
+**Common Use Cases:**
+- Pull code or binaries from a repository before the application starts
+- Wait for an external service (like a database) to become available
+- Initialize configuration files
+- Run database migrations
+- Set up network rules or security policies
+
+**Example - Init Containers:**
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: myapp-pod
+  labels:
+    app: myapp
+spec:
+  initContainers:
+  - name: init-myservice
+    image: busybox:1.31
+    command: ["sh", "-c", "until nslookup myservice; do echo waiting for myservice; sleep 2; done;"]
+  - name: init-mydb
+    image: busybox:1.31
+    command: ["sh", "-c", "until nslookup mydb; do echo waiting for mydb; sleep 2; done;"]
+  containers:
+  - name: myapp-container
+    image: busybox:1.28
+    command: ["sh", "-c", "echo The app is running! && sleep 3600"]
+```
+
+**How It Works:**
+1. `init-myservice` runs first - waits for `myservice` to be available
+2. Once `init-myservice` succeeds (exits 0), `init-mydb` runs - waits for `mydb` to be available
+3. Once all init containers complete, `myapp-container` starts
+4. If any init container fails, the Pod restarts and all init containers run again from the beginning
+
+**Key Points:**
+- Init containers run sequentially (not in parallel)
+- All init containers must succeed before main containers start
+- Init containers are not restarted individually - if one fails, the Pod restarts and all init containers rerun
+
+#### Sidecar Containers
+
+*Sidecar containers run alongside main containers to provide supporting functionality like logging, monitoring, or proxy services.*
+
+**Characteristics:**
+- Run **alongside** main containers for the entire Pod lifecycle
+- Share the same network and storage with main containers
+- Typically handle cross-cutting concerns (logging, monitoring, networking)
+- Must stay alive as long as the main containers are running
+
+**Native Sidecar Containers (Kubernetes 1.33+):**
+
+Starting with Kubernetes v1.33, sidecar containers are natively supported. This allows sidecar containers to follow a defined lifecycle relative to the main containers without requiring entrypoint hacks.
+
+**How Native Sidecars Work:**
+- Declared using `restartPolicy: Always` field inside the `initContainers` block
+- Kubernetes treats such containers as sidecars, ensuring they:
+  - Start before main containers
+  - Run alongside them
+  - Shut down after the main containers complete
+
+**Example - Native Sidecar Configuration:**
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: sidecar-example
+spec:
+  initContainers:
+  - name: sidecar-logger
+    image: busybox:1.31
+    restartPolicy: Always  # Marks this as a sidecar container
+    command: ["sh", "-c", "while true; do echo Sidecar running; sleep 10; done"]
+  containers:
+  - name: main-app
+    image: busybox:1.31
+    command: ["sh", "-c", "echo Main app starting; sleep 60"]
+```
+
+**In this setup:**
+- The `sidecar-logger` container behaves like a sidecar, though declared in `initContainers`
+- It uses `restartPolicy: Always` to stay alive throughout the Pod lifecycle
+- Kubernetes starts the sidecar first, waits for readiness, then starts the main app
+- The sidecar shuts down after the main container completes
+
+**Traditional Sidecar Pattern (Pre-1.33):**
+
+Before native sidecar support, sidecars were implemented as regular containers that run indefinitely:
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: sidecar-example
+spec:
+  containers:
+  - name: main-app
+    image: myapp:latest
+    command: ["./app"]
+  - name: sidecar-logger
+    image: logger:latest
+    command: ["./logger"]
+    # Runs alongside main-app for entire Pod lifecycle
+```
+
+**Common Sidecar Use Cases:**
+- Logging agents (collect and forward logs)
+- Monitoring agents (collect metrics)
+- Network proxies (handle networking concerns)
+- Config file watchers (reload configuration)
+- Service mesh sidecars (handle service-to-service communication)
+
+#### Co-Located Containers
+
+*Co-located containers are multiple containers in the same Pod that work together as a cohesive unit. All containers are main containers and are expected to stay alive for the Pod's lifecycle.*
+
+**Characteristics:**
+- All containers are defined under `spec.containers` (not initContainers)
+- All containers run simultaneously (not sequentially)
+- All containers are expected to stay alive for the Pod's lifecycle
+- Containers share network and storage
+- If any container fails, the entire Pod restarts
+
+**Example - Co-Located Containers:**
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: webapp-pod
+spec:
+  containers:
+  - name: web-server
+    image: nginx:latest
+    ports:
+    - containerPort: 80
+  - name: log-processor
+    image: log-processor:latest
+    # Both containers run together and must stay alive
+```
+
+**Common Use Cases:**
+- Web server with log processor
+- Application with caching service
+- Frontend and backend services that must be together
+- Main application with helper service
+
+**Key Differences:**
+
+| Aspect | Init Containers | Sidecar Containers | Co-Located Containers |
+|--------|----------------|-------------------|----------------------|
+| **Location in Spec** | `spec.initContainers` | `spec.initContainers` (1.33+) or `spec.containers` | `spec.containers` |
+| **Execution Order** | Sequential (one after another) | Before main, then alongside | Simultaneous |
+| **Lifecycle** | Run to completion before main | Run alongside main containers | Run together for Pod lifecycle |
+| **Restart Behavior** | Rerun from beginning if Pod restarts | Restarted with Pod | Restarted with Pod |
+| **Use Case** | Setup/preparation tasks | Supporting functionality | Related services working together |
+
+**Key Takeaways:**
+- Multi-container Pods share network, storage, and lifecycle
+- Init containers run sequentially before main containers
+- Sidecar containers (native in 1.33+) support main containers throughout lifecycle
+- Co-located containers run together as a unit
+- Pod restarts apply to all containers - individual containers are not restarted separately
 
 ### Resource Requests and Limits
 
@@ -767,13 +1050,17 @@ kubectl describe resourcequota my-resource-quota
 - **Best Practice**: Always set both requests and limits to ensure proper scheduling and resource protection
 - **Equal Values**: You can set requests and limits to the same value for guaranteed resources
 
-## Security
+---
 
-### Security Context
+## Resource Management
 
-*Security Context defines privilege and access control settings for a Pod or Container. It allows you to control various security-related aspects like user IDs, capabilities, and permissions.*
+*This section covers resource allocation, limits, and quotas. Resource Requests and Limits are defined in pod specifications. LimitRange sets defaults per container. ResourceQuotas set namespace-wide limits.*
 
-**Docker vs Kubernetes:**
+---
+
+## Core Resources
+
+## ReplicaSets
 
 | Docker Command | Kubernetes Pod Field |
 |---------------|---------------------|
@@ -921,7 +1208,15 @@ securityContext:
 4. **Least privilege**: Grant only the minimum permissions and capabilities required
 5. **Container-level for capabilities**: Remember that capabilities can only be set at container level
 
-## ReplicaSets
+---
+
+## Security
+
+### Security Context
+
+*Security Context defines privilege and access control settings for a Pod or Container. It allows you to control various security-related aspects like user IDs, capabilities, and permissions.*
+
+**Docker vs Kubernetes:**
 
 ### Overview
 
@@ -1175,6 +1470,10 @@ kubectl create -f compute-quota.yaml
 - *Total CPU limits: 10 cores*
 - *Total memory limits: 10Gi*
 
+---
+
+## Networking
+
 ## Services
 
 ### Overview
@@ -1357,6 +1656,876 @@ k delete svc <service-name>
 k get pods -l app=myapp,type=front-end
 ```
 *This uses the same label selector that the service uses to find matching pods.*
+
+## Service Accounts
+
+### Overview
+
+*Service Accounts are Kubernetes identities used by applications, pods, and services to authenticate and interact with the Kubernetes API server. They provide a way for applications running in pods to prove their identity when making API requests.*
+
+**What Service Accounts Do:**
+- Provide identity for pods and applications
+- Enable authentication to the Kubernetes API
+- Allow fine-grained access control through RBAC (Role-Based Access Control)
+- Automatically manage tokens for API authentication
+
+**Key Concepts:**
+- Service Accounts are namespace-scoped resources
+- Each pod can have one service account attached
+- Tokens are automatically created and mounted for service accounts
+- Tokens are used to authenticate API requests
+
+### Default Service Account
+
+*Every namespace in Kubernetes has a default service account that is automatically created.*
+
+**Characteristics:**
+- **Name**: `default`
+- **Automatic Creation**: Created automatically when a namespace is created
+- **Automatic Attachment**: Automatically attached to pods if no service account is specified
+- **Limited Permissions**: By default, has minimal permissions (may not be able to access the API)
+
+**Viewing the Default Service Account:**
+
+```bash
+kubectl get serviceaccount
+# or shorthand
+kubectl get sa
+```
+
+*Output example:*
+```
+NAME      SECRETS   AGE
+default   1         218d
+```
+
+**Key Points:**
+- The default service account exists in every namespace
+- If you don't specify a service account in your pod, it uses the `default` service account
+- The default service account may have limited or no API permissions depending on your cluster configuration
+
+### Creating Service Accounts
+
+*You can create custom service accounts for your applications to have specific identities and permissions.*
+
+**Method 1: Using kubectl (Imperative)**
+
+```bash
+kubectl create serviceaccount dashboard-sa
+```
+
+*Output:*
+```
+serviceaccount "dashboard-sa" created
+```
+
+**Method 2: Using YAML (Declarative)**
+
+```yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dashboard-sa
+  namespace: default  # Optional - defaults to current namespace
+```
+
+**Create from YAML:**
+```bash
+kubectl create -f serviceaccount.yaml
+```
+
+**Key Points:**
+- Service accounts are namespace-scoped
+- You can create multiple service accounts in the same namespace
+- Custom service accounts are useful for applications that need specific API permissions
+- Service accounts are used by pods, but can also be used by external applications (CI/CD, monitoring tools)
+
+### Attaching Service Accounts to Pods
+
+*To use a specific service account in a pod, specify it using the `serviceAccountName` field in the pod definition.*
+
+**Pod Definition with Service Account:**
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: my-kubernetes-dashboard
+spec:
+  containers:
+  - name: my-kubernetes-dashboard
+    image: my-kubernetes-dashboard
+  serviceAccountName: dashboard-sa  # Attach custom service account
+```
+
+**What Happens When a Service Account is Attached:**
+
+When a service account is attached to a pod, Kubernetes automatically:
+
+1. **Creates a Token**: Generates a JWT (JSON Web Token) for the service account
+2. **Mounts as Projected Volume**: Mounts the token and related files into the pod at:
+   ```
+   /var/run/secrets/kubernetes.io/serviceaccount/
+   ```
+3. **Automatic Token Rotation**: Periodically rotates the token for security
+4. **Automatic Expiration**: Expires the token when the pod is deleted
+
+**Files Mounted in Pod:**
+
+The following files are automatically mounted in every pod:
+
+| File | Description |
+|------|-------------|
+| `token` | JWT token for API authentication |
+| `ca.crt` | Certificate Authority certificate |
+| `namespace` | The namespace the service account belongs to |
+
+**If No Service Account is Specified:**
+
+If you don't specify `serviceAccountName` in your pod definition:
+- Kubernetes automatically uses the `default` service account
+- The default service account token is still mounted at the same location
+- The pod may have limited or no API permissions
+
+**Example - Pod Using Default Service Account:**
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: my-pod
+spec:
+  containers:
+  - name: app
+    image: nginx
+  # No serviceAccountName specified - uses 'default' service account
+```
+
+### Service Account Tokens
+
+*Tokens are JWT (JSON Web Token) credentials that prove the identity of a service account when making API requests.*
+
+**Token Structure:**
+
+A JWT token has three parts:
+```
+header.payload.signature
+```
+
+**Token Claims (Payload):**
+
+When decoded, a service account token contains:
+
+```json
+{
+  "iss": "https://kubernetes.default.svc.cluster.local",
+  "sub": "system:serviceaccount:default:dashboard-sa",
+  "aud": ["https://kubernetes.default.svc.cluster.local"],
+  "exp": 1664037763,
+  "iat": 1664034163,
+  "kubernetes.io": {
+    "namespace": "default",
+    "serviceaccount": {
+      "name": "dashboard-sa",
+      "uid": "7d0fdfe8-fbf3-4ff9-b362-d004297a73f6"
+    }
+  }
+}
+```
+
+**Key Token Fields:**
+
+| Field | Description |
+|------|-------------|
+| `iss` | Issuer - who created the token (Kubernetes API) |
+| `sub` | Subject - the service account identity |
+| `aud` | Audience - who the token is intended for |
+| `exp` | Expiration time (Unix timestamp) |
+| `iat` | Issued at time (Unix timestamp) |
+| `kubernetes.io` | Kubernetes-specific claims (namespace, service account details) |
+
+**Automatic Token Management:**
+
+- **Creation**: Tokens are automatically created when a service account is attached to a pod
+- **Rotation**: Tokens are automatically rotated periodically for security
+- **Expiration**: Tokens expire when the pod is deleted
+- **Location**: Tokens are mounted at `/var/run/secrets/kubernetes.io/serviceaccount/token`
+
+**Creating Tokens for External Applications:**
+
+For external applications (CI/CD pipelines, monitoring tools) that need to authenticate to the Kubernetes API:
+
+```bash
+kubectl create token dashboard-sa --duration=2h
+```
+
+*This command:*
+- Creates a new token for the `dashboard-sa` service account
+- Sets token expiration to 2 hours (`--duration=2h`)
+- Outputs the token (JWT string) that can be used in API requests
+
+**Token Duration Options:**
+
+```bash
+# 1 hour token
+kubectl create token dashboard-sa --duration=1h
+
+# 2 hour token
+kubectl create token dashboard-sa --duration=2h
+
+# 24 hour token
+kubectl create token dashboard-sa --duration=24h
+
+# Default duration (usually 1 hour)
+kubectl create token dashboard-sa
+```
+
+**Token Signing:**
+
+- **Signing**: Tokens are signed using the Kubernetes API server's **private key** (`sa.key`)
+- **Verification**: Tokens are verified using the Kubernetes API server's **public key** (`sa.pub`)
+- **Key Location**: 
+  - Kubeadm clusters: `/etc/kubernetes/pki/sa.key` (private) and `/etc/kubernetes/pki/sa.pub` (public)
+  - Cloud providers: Managed by the cloud provider
+- **Security**: The private key must remain secret - only the API server can create valid tokens
+
+### Dashboard Authentication Flow
+
+*When you paste a service account token into the Kubernetes Dashboard, here's the step-by-step authentication flow:*
+
+**Step-by-Step Authentication Flow:**
+
+```
+┌─────────────────────────────────────────────────────┐
+│  STEP 1: You Generate Token                         │
+└─────────────────────────────────────────────────────┘
+$ kubectl create token dashboard-sa --duration=2h
+eyJhbGciOiJSUzI1NiIsImtpZCI6IiJ9.eyJpc3MiOiJrdWJ1cm5ldGVzL3NlcnZpY2VhY2NvdW50Iiwia3ViZXJuZXRlcy5pby9zZXJ2aWNlYWNjb3VudC4uLi4=
+
+                    │
+                    ▼
+┌─────────────────────────────────────────────────────┐
+│  STEP 2: You Paste Token in Dashboard               │
+│                                                      │
+│  Dashboard UI:                                      │
+│  ┌──────────────────────────────────────┐          │
+│  │  Authentication                      │          │
+│  │  ┌────────────────────────────────┐  │          │
+│  │  │ Token: [paste here]            │  │          │
+│  │  └────────────────────────────────┘  │          │
+│  │  [Login Button]                      │          │
+│  └──────────────────────────────────────┘          │
+└─────────────────────────────────────────────────────┘
+                    │
+                    ▼
+┌─────────────────────────────────────────────────────┐
+│  STEP 3: Dashboard Sends Token to API Server       │
+│                                                      │
+│  HTTP Request:                                       │
+│  POST https://<API_SERVER>:6443/api/v1/...         │
+│  Headers:                                            │
+│    Authorization: Bearer eyJhbGciOiJSUzI1NiIs...    │
+└─────────────────────────────────────────────────────┘
+                    │
+                    ▼
+┌─────────────────────────────────────────────────────┐
+│  STEP 4: API Server Validates Token                 │
+│                                                      │
+│  API Server Process:                                 │
+│  1. Receives token from dashboard                    │
+│  2. Extracts header.payload.signature               │
+│  3. Reads PUBLIC KEY (sa.pub)                       │
+│  4. Verifies signature using PUBLIC KEY             │
+│     - Decrypts signature with public key             │
+│     - Compares with hash of header+payload          │
+│  5. Checks token claims:                            │
+│     - exp: Not expired? ✅                           │
+│     - iss: Issuer is Kubernetes? ✅                 │
+│     - sub: serviceaccount:default:dashboard-sa ✅   │
+│  6. If all valid → Authentication SUCCESS ✅         │
+└─────────────────────────────────────────────────────┘
+                    │
+                    ▼
+┌─────────────────────────────────────────────────────┐
+│  STEP 5: API Server Checks Authorization (RBAC)    │
+│                                                      │
+│  RBAC Check:                                         │
+│  - Does serviceaccount:default:dashboard-sa          │
+│    have permission to access /api/v1/...?           │
+│  - Checks Role/RoleBinding/ClusterRole              │
+│  - If authorized → Returns data ✅                  │
+└─────────────────────────────────────────────────────┘
+                    │
+                    ▼
+┌─────────────────────────────────────────────────────┐
+│  STEP 6: Dashboard Receives Response                │
+│                                                      │
+│  Dashboard:                                          │
+│  - Token is valid ✅                                 │
+│  - User is authenticated ✅                         │
+│  - Shows Kubernetes resources                        │
+│  - Can now make API calls using this token          │
+└─────────────────────────────────────────────────────┘
+```
+
+**Key Points:**
+
+1. **Token Generation**: Token is created and signed by the API server using its private key
+2. **Token Pasting**: You paste the token into the dashboard's authentication form
+3. **API Request**: Dashboard sends the token in the `Authorization: Bearer` header
+4. **Token Verification**: API server verifies the token signature using its public key
+5. **Authentication**: If token is valid (signature matches, not expired, issuer correct) → authenticated
+6. **Authorization**: RBAC checks if the service account has permissions for the requested action
+7. **Access Granted**: If authenticated and authorized, dashboard receives data and displays resources
+
+**What Happens Internally:**
+
+- **Token Signing**: API server uses its **private key** (`sa.key`) to sign the token
+- **Token Verification**: API server uses its **public key** (`sa.pub`) to verify the token signature
+- **Digital Signature Pattern**: 
+  - Private key signs (only API server can create valid tokens)
+  - Public key verifies (anyone can verify, but only API server can sign)
+- **Security**: This ensures only the API server can create valid tokens, preventing token forgery
+
+### Using Tokens for API Authentication
+
+*Service account tokens are used to authenticate requests to the Kubernetes API server.*
+
+**How Authentication Works:**
+
+1. **Pod Reads Token**: Application in pod reads token from `/var/run/secrets/kubernetes.io/serviceaccount/token`
+2. **Sends in Request**: Token is sent in the `Authorization: Bearer` header
+3. **API Server Validates**: API server validates token signature, expiration, and issuer
+4. **Authorization Check**: RBAC checks if the service account has permissions for the requested action
+5. **Response**: API server returns response if authenticated and authorized
+
+**Example - Reading Token from Pod:**
+
+```bash
+# Read token from inside a pod
+kubectl exec -it my-kubernetes-dashboard -- cat /var/run/secrets/kubernetes.io/serviceaccount/token
+```
+
+**Example - Using Token in curl Command:**
+
+```bash
+# Get the token
+TOKEN=$(kubectl exec my-kubernetes-dashboard -- cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+
+# Use token to authenticate API request
+curl https://<API_SERVER_IP>:6443/api \
+  --insecure \
+  --header "Authorization: Bearer $TOKEN"
+```
+
+**Example - Decoding Token (for inspection):**
+
+```bash
+# Get token
+TOKEN=$(kubectl exec my-kubernetes-dashboard -- cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+
+# Decode and view token claims
+echo $TOKEN | jq -R 'split(".") | select(length > 0) | .[0],.[1] | @base64d | fromjson'
+```
+
+**Token in API Request Header:**
+
+```
+Authorization: Bearer eyJhbGciOiJSUzI1NiIsImtpZCI6IiJ9.eyJpc3MiOiJrdWJ1cm5ldGVzL3NlcnZpY2VhY2NvdW50Iiwia3ViZXJuZXRlcy5pby9zZXJ2aWNlYWNjb3VudC4uLi4=
+```
+
+**Important Notes:**
+- Tokens are sensitive credentials - treat them like passwords
+- Tokens expire - check the `exp` field for expiration time
+- Use HTTPS in production - never use `--insecure` in production
+- RBAC controls what the service account can do - tokens only prove identity
+
+### Basic Commands
+
+**List all service accounts:**
+```bash
+kubectl get serviceaccount
+# or shorthand
+kubectl get sa
+```
+
+**Get details of a specific service account:**
+```bash
+kubectl describe serviceaccount dashboard-sa
+# or
+kubectl describe sa dashboard-sa
+```
+
+**Create a service account:**
+```bash
+kubectl create serviceaccount dashboard-sa
+```
+
+**Create a token for a service account:**
+```bash
+kubectl create token dashboard-sa --duration=2h
+```
+
+**Delete a service account:**
+```bash
+kubectl delete serviceaccount dashboard-sa
+# or
+kubectl delete sa dashboard-sa
+```
+
+**View service accounts in a specific namespace:**
+```bash
+kubectl get sa -n <namespace>
+```
+
+**Read token from inside a pod:**
+```bash
+kubectl exec -it <pod-name> -- cat /var/run/secrets/kubernetes.io/serviceaccount/token
+```
+
+**List all files in service account mount:**
+```bash
+kubectl exec -it <pod-name> -- ls /var/run/secrets/kubernetes.io/serviceaccount
+```
+
+**Key Takeaways:**
+- Service accounts provide identity for pods and applications
+- Every namespace has a default service account
+- Tokens are automatically created and mounted when a service account is attached to a pod
+- Tokens are used in the `Authorization: Bearer` header for API authentication
+- RBAC controls what service accounts can do (authorization)
+- Tokens are automatically rotated and expire when pods are deleted
+- Tokens are signed with the API server's private key and verified with the public key
+
+## Pod Scheduling and Node Selection
+
+*Kubernetes provides several mechanisms to control where pods are scheduled: Taints and Tolerations, NodeSelector, and Node Affinity. These mechanisms allow you to restrict pod placement based on node characteristics.*
+
+### Taints and Tolerations
+
+#### Overview
+
+*Taints and Tolerations are Kubernetes mechanisms that allow nodes to repel or evict pods that don't have matching tolerations. Taints are applied to nodes, and tolerations are applied to pods.*
+
+**Key Concept:**
+- **Taints** tell nodes: "Only accept pods with matching tolerations"
+- **Tolerations** tell pods: "I can tolerate certain taints"
+- **This does NOT guarantee pod placement** - the scheduler still decides where pods go
+- **For pod-to-node affinity**, use Node Affinity instead
+
+**How It Works:**
+- Taints are set on nodes to repel pods
+- Pods must have matching tolerations to be scheduled on tainted nodes
+- If a pod doesn't tolerate a node's taint, it cannot be scheduled on that node
+- Tolerations allow pods to be scheduled, but the scheduler makes the final decision
+
+#### Taint Effects
+
+*There are three types of taint effects that determine what happens to pods that don't tolerate the taint:*
+
+| Taint Effect | Behavior for Non-Tolerating Pods |
+|--------------|----------------------------------|
+| **NoSchedule** | Pods that do not tolerate this taint will **not be scheduled** on the node |
+| **PreferNoSchedule** | Kubernetes will try to avoid scheduling pods without matching toleration, but it's not guaranteed |
+| **NoExecute** | Pods that do not tolerate this taint will be **evicted** from the node (if already running) and new pods **will not be scheduled** |
+
+**Important Notes:**
+- **NoSchedule**: Prevents new pods from being scheduled on the node
+- **PreferNoSchedule**: Soft preference - scheduler tries to avoid the node but may schedule if needed
+- **NoExecute**: Most aggressive - **evicts existing pods** that don't tolerate the taint, in addition to preventing new scheduling
+
+#### Creating Taints
+
+*Apply a taint to a node using the `kubectl taint` command.*
+
+**Basic Syntax:**
+
+```bash
+kubectl taint nodes <node-name> <key>=<value>:<taint-effect>
+```
+
+**Example - NoSchedule Taint:**
+
+```bash
+kubectl taint nodes node-name app=special:NoSchedule
+```
+
+**Example - NoExecute Taint:**
+
+```bash
+kubectl taint nodes node-name app=database:NoExecute
+```
+
+**Viewing Taints on a Node:**
+
+```bash
+kubectl describe node <node-name> | grep Taint
+```
+
+*Output example:*
+```
+Taints: node-role.kubernetes.io/master:NoSchedule
+```
+
+**Master Node Default Taint:**
+
+- Master/Control Plane nodes have a **default taint** set automatically
+- This prevents regular pods from being scheduled on master nodes
+- Master nodes typically have: `node-role.kubernetes.io/master:NoSchedule`
+- This reserves master nodes for Kubernetes control plane components
+
+**Removing a Taint:**
+
+```bash
+kubectl taint nodes <node-name> <key>=<value>:<taint-effect>-
+```
+
+*Note the `-` at the end to remove the taint.*
+
+#### Tolerations
+
+*Tolerations are added to pod specifications to allow pods to be scheduled on nodes with matching taints.*
+
+**Pod Definition with Toleration:**
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: myapp-pod
+spec:
+  containers:
+  - name: nginx-container
+    image: nginx
+  tolerations:
+  - key: app
+    operator: Equal
+    value: special
+    effect: NoSchedule
+```
+
+**Toleration Fields:**
+
+| Field | Description | Values |
+|-------|-------------|--------|
+| **key** | The taint key to match | Any string (e.g., `app`, `node-role.kubernetes.io/master`) |
+| **operator** | How to match the value | `Equal` (exact match) or `Exists` (key exists, ignore value) |
+| **value** | The taint value (required if operator is `Equal`) | Any string |
+| **effect** | The taint effect to tolerate | `NoSchedule`, `PreferNoSchedule`, or `NoExecute` |
+
+**Example - Tolerating Master Node Taint:**
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: master-pod
+spec:
+  containers:
+  - name: app
+    image: nginx
+  tolerations:
+  - key: node-role.kubernetes.io/master
+    operator: Exists
+    effect: NoSchedule
+```
+
+**Example - Tolerating Multiple Taints:**
+
+```yaml
+tolerations:
+- key: app
+  operator: Equal
+  value: special
+  effect: NoSchedule
+- key: environment
+  operator: Equal
+  value: production
+  effect: NoExecute
+```
+
+#### Important Notes
+
+**Tolerations Do NOT Guarantee Placement:**
+
+- **Tolerations allow pods to be scheduled** on tainted nodes, but **do not force** placement
+- The scheduler may place a pod with matching tolerations on a different node
+- The scheduler considers resource availability, node affinity, and other factors
+
+**Taints and Tolerations vs Node Affinity:**
+
+- **Taints/Tolerations**: Tell nodes to **repel** pods without matching tolerations
+- **Node Affinity**: Tell pods to **prefer** or **require** specific nodes
+- **For pod-to-node restriction**, use Node Affinity, not Taints/Tolerations
+
+**NoExecute Effect:**
+
+- **Evicts existing pods** that don't tolerate the taint
+- Happens immediately when taint is applied
+- Only pods with matching tolerations can remain on the node
+
+**Master Node Taint:**
+
+- Master nodes have a **default taint**: `node-role.kubernetes.io/master:NoSchedule`
+- This prevents regular workloads from being scheduled on master nodes
+- Only system pods and pods with matching tolerations can run on master nodes
+
+#### Basic Commands
+
+**Apply a taint to a node:**
+
+```bash
+kubectl taint nodes <node-name> <key>=<value>:<taint-effect>
+```
+
+**Remove a taint from a node:**
+
+```bash
+kubectl taint nodes <node-name> <key>=<value>:<taint-effect>-
+```
+
+**View taints on a node:**
+
+```bash
+kubectl describe node <node-name> | grep Taint
+```
+
+**View all nodes and their taints:**
+
+```bash
+kubectl get nodes
+kubectl describe node <node-name>
+```
+
+**Key Takeaways:**
+- Taints repel pods; tolerations allow pods to be scheduled on tainted nodes
+- Three taint effects: `NoSchedule`, `PreferNoSchedule`, `NoExecute`
+- `NoExecute` evicts existing pods that don't tolerate the taint
+- Tolerations allow scheduling but don't guarantee placement - scheduler decides
+- Master nodes have default taints to prevent regular workloads
+- Use Node Affinity for pod-to-node placement requirements
+
+### Node Labels
+
+*Labels are key-value pairs attached to nodes that can be used to identify node characteristics (e.g., size, environment, hardware type).*
+
+**Labeling a Node:**
+
+```bash
+kubectl label nodes <node-name> <label-key>=<label-value>
+```
+
+**Example - Label Node by Size:**
+
+```bash
+kubectl label nodes node-1 size=Large
+```
+
+**Viewing Node Labels:**
+
+```bash
+kubectl get nodes --show-labels
+# or
+kubectl describe node <node-name>
+```
+
+**Use Case:**
+- Label nodes with characteristics like `size=Large`, `size=Medium`, `size=Small`
+- Label nodes with environment: `environment=production`, `environment=staging`
+- Use labels to select specific nodes for pod scheduling
+
+### NodeSelector
+
+*NodeSelector is a simple way to restrict a pod to only run on nodes with specific labels. It uses exact key-value matching.*
+
+**Use Case:**
+- When you want to schedule resource-intensive workloads only on nodes with sufficient resources
+- When you need exact label matching (key and value must match exactly)
+
+**Limitations:**
+- Only supports exact key-value matching
+- Cannot specify multiple values (e.g., "Medium OR Large")
+- Cannot use operators like `In`, `NotIn`, etc.
+
+**Pod Definition with NodeSelector:**
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: myapp-pod
+spec:
+  containers:
+  - name: data-processor
+    image: data-processor
+  nodeSelector:
+    size: Large
+```
+
+**How It Works:**
+1. **Label the node**: `kubectl label nodes node-1 size=Large`
+2. **Pod specifies nodeSelector**: `nodeSelector: size: Large`
+3. **Scheduler matches**: Pod can only be scheduled on nodes with `size=Large` label
+4. **If no matching node**: Pod remains in `Pending` state
+
+**Example Workflow:**
+
+```bash
+# Step 1: Label nodes
+kubectl label nodes node-1 size=Large
+kubectl label nodes node-2 size=Small
+
+# Step 2: Create pod with nodeSelector
+kubectl create -f pod-definition.yaml
+# Pod will only be scheduled on node-1 (has size=Large label)
+```
+
+**Key Points:**
+- Simple and straightforward for exact label matching
+- Limited capability - cannot handle "OR" conditions
+- For more complex selection, use Node Affinity
+
+### Node Affinity
+
+*Node Affinity provides more expressive and flexible ways to select nodes compared to NodeSelector. It supports operators, multiple values, and both hard and soft requirements.*
+
+**Why Node Affinity?**
+
+NodeSelector limitations:
+- Cannot schedule pods on "Medium OR Large" nodes (only exact match)
+- Cannot use operators like `NotIn`, `Exists`, etc.
+- No support for soft preferences (required vs preferred)
+
+Node Affinity solves these limitations.
+
+#### Node Affinity Types
+
+*Node Affinity has two types that determine what happens if no matching node is found and what happens if node labels change after scheduling:*
+
+| Type | Behavior When No Match Found | Behavior If Labels Change After Scheduling |
+|------|------------------------------|--------------------------------------------|
+| **requiredDuringSchedulingIgnoredDuringExecution** | Pod **cannot be scheduled** (stays Pending) | Pod **continues running** (ignored) |
+| **preferredDuringSchedulingIgnoredDuringExecution** | Pod can be scheduled on any node (soft preference) | Pod **continues running** (ignored) |
+
+**Understanding the Names:**
+- **requiredDuringScheduling**: Must satisfy rule to schedule pod (hard requirement)
+- **preferredDuringScheduling**: Try to satisfy rule, but not mandatory (soft preference)
+- **IgnoredDuringExecution**: After pod is scheduled, if node labels change and no longer match, the pod keeps running (not evicted)
+
+**Example - Required (Hard Requirement):**
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: myapp-pod
+spec:
+  containers:
+  - name: data-processor
+    image: data-processor
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+        - matchExpressions:
+          - key: size
+            operator: In
+            values:
+            - Large
+            - Medium
+```
+
+**Example - Preferred (Soft Preference):**
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: myapp-pod
+spec:
+  containers:
+  - name: data-processor
+    image: data-processor
+  affinity:
+    nodeAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        preference:
+          matchExpressions:
+          - key: size
+            operator: In
+            values:
+            - Large
+            - Medium
+```
+
+#### Operators
+
+*Node Affinity supports various operators for flexible node selection:*
+
+| Operator | Description | Example |
+|----------|-------------|---------|
+| **In** | Node label value must be in the provided list | `values: [Large, Medium]` - matches Large OR Medium |
+| **NotIn** | Node label value must NOT be in the provided list | `values: [Small]` - excludes Small nodes |
+| **Exists** | Node must have the label key (any value) | No `values` field needed |
+| **DoesNotExist** | Node must NOT have the label key | No `values` field needed |
+| **Gt** | Node label value must be greater than specified (numeric) | `values: ["3"]` - value > 3 |
+| **Lt** | Node label value must be less than specified (numeric) | `values: ["5"]` - value < 5 |
+
+**Example - Using In Operator (Multiple Values):**
+
+```yaml
+affinity:
+  nodeAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      nodeSelectorTerms:
+      - matchExpressions:
+        - key: size
+          operator: In
+          values:
+          - Large
+          - Medium
+```
+
+*This pod can be scheduled on nodes with `size=Large` OR `size=Medium`.*
+
+**Example - Using NotIn Operator (Anti-Affinity):**
+
+```yaml
+affinity:
+  nodeAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      nodeSelectorTerms:
+      - matchExpressions:
+        - key: size
+          operator: NotIn
+          values:
+          - Small
+```
+
+*This pod will NOT be scheduled on nodes with `size=Small`.*
+
+**What Happens If No Matching Node is Found?**
+
+- **requiredDuringSchedulingIgnoredDuringExecution**: Pod remains in `Pending` state until a matching node becomes available
+- **preferredDuringSchedulingIgnoredDuringExecution**: Pod can be scheduled on any available node (preference ignored)
+
+**What Happens If Node Labels Change After Pod is Scheduled?**
+
+- Both types: Pod **continues running** (the "IgnoredDuringExecution" part)
+- The scheduler does NOT evict the pod
+- Labels are only checked during scheduling, not during execution
+
+**Key Takeaways:**
+- Node Affinity provides more flexibility than NodeSelector
+- Use `required` for hard requirements, `preferred` for soft preferences
+- `IgnoredDuringExecution` means pods won't be evicted if labels change
+- Operators like `In`, `NotIn` allow complex selection logic
+- Use `In` operator to schedule on "Medium OR Large" nodes
+
+---
+
+## Configuration Management
 
 ### Environment Variables
 
