@@ -104,6 +104,27 @@
   - [Using Tokens for API Authentication](#using-tokens-for-api-authentication)
   - [Basic Commands](#basic-commands-4)
 
+### Observability
+- [Pod Lifecycle](#pod-lifecycle)
+- [Readiness Probes](#readiness-probes)
+  - [Overview](#readiness-probes-overview)
+  - [HTTP Get Probe](#http-get-probe)
+  - [TCP Socket Probe](#tcp-socket-probe)
+  - [Exec Command Probe](#exec-command-probe)
+- [Liveness Probes](#liveness-probes)
+  - [Overview](#liveness-probes-overview)
+  - [Configuration Examples](#liveness-probe-configuration-examples)
+- [Logging](#logging)
+- [Monitoring](#monitoring)
+
+### Pod Design
+- [Selectors and Labels](#selectors-and-labels)
+- [Annotations](#annotations)
+
+### Rolling Updates and Rollbacks
+- [Rolling Updates](#rolling-updates)
+- [Rollbacks](#rollbacks)
+
 ---
 
 ## Getting Started
@@ -3128,3 +3149,952 @@ spec:
 - Integrate with enterprise secret management systems
 - Maintain better security and compliance
 - Meet regulatory requirements for secret management
+
+## Observability
+
+### Pod Lifecycle
+
+*Understanding the lifecycle of a Pod is crucial for managing applications in Kubernetes. A Pod goes through several phases from creation to termination.*
+
+**Pod Lifecycle Phases:**
+
+1. **Pending** - When a Pod is first created, it starts in the `Pending` state
+   - The Pod has been accepted by the Kubernetes system, but one or more of its containers have not been created yet
+   - This includes time spent being scheduled on a node and downloading images
+
+2. **Container Creation** - After the Pod is scheduled to a node by the scheduler, it moves into the container creation phase
+   - Kubernetes pulls container images
+   - Creates and starts containers
+   - Runs init containers (if any)
+
+3. **Running** - When all containers in a Pod are running, it moves into the `Running` phase
+   - The Pod is bound to a node
+   - All containers have been created
+   - At least one container is still running or is in the process of starting or restarting
+
+4. **Termination** - The Pod remains in the `Running` phase until:
+   - The processes inside the containers exit
+   - The Pod is deleted
+   - The Pod is evicted from the node
+
+**Key Points:**
+- A Pod stays in the `Running` phase as long as at least one container is running
+- If all containers exit successfully, the Pod enters a `Succeeded` state
+- If a container fails, the Pod may enter a `Failed` state (depending on restart policy)
+- The `Ready` condition is set when the Pod is ready to accept traffic
+
+**Important Note:**
+- As soon as the `Ready` condition is set to `True`, traffic will be redirected to this Pod
+- This happens even when the application inside the Pod is still in a running or loading state
+- This is why **Readiness Probes** are essential for production applications
+
+### Readiness Probes
+
+#### Readiness Probes Overview {#readiness-probes-overview}
+
+*A readiness probe determines if a Pod is ready to accept traffic. If the readiness probe fails, the Pod is removed from Service endpoints, preventing traffic from being sent to containers that are not yet ready to serve requests.*
+
+**Why Readiness Probes Are Needed:**
+
+When a Pod's `Ready` condition is set to `True`, Kubernetes immediately starts routing traffic to it through Services. However, the application inside the container might still be:
+- Initializing
+- Loading configuration
+- Connecting to databases
+- Warming up caches
+- Performing other startup tasks
+
+Without a readiness probe, users could receive errors or incomplete responses because the application isn't actually ready to handle requests, even though the container is running.
+
+**How Readiness Probes Work:**
+
+- Kubernetes periodically performs the readiness check (default: every 10 seconds)
+- If the probe succeeds, the Pod is marked as ready and receives traffic
+- If the probe fails, the Pod is marked as not ready and is removed from Service endpoints
+- The probe continues to run throughout the Pod's lifecycle
+- **Important:** A failed readiness probe does NOT restart the container - it only removes the Pod from Service endpoints
+
+**Three Types of Readiness Probes:**
+
+1. **HTTP Get Probe** - Performs an HTTP GET request to a specified path and port
+2. **TCP Socket Probe** - Checks if a specific port is open and accepting connections
+3. **Exec Command Probe** - Executes a command inside the container and checks if it exits successfully (exit code 0)
+
+#### HTTP Get Probe
+
+*The HTTP Get probe is the most common type of readiness probe. It makes an HTTP GET request to a specified endpoint and considers the Pod ready if the response status code is between 200 and 399.*
+
+**Configuration:**
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: simple-webapp
+  labels:
+    name: simple-webapp
+spec:
+  containers:
+    - name: simple-webapp
+      image: simple-webapp
+      ports:
+        - containerPort: 8080
+      readinessProbe:
+        httpGet:
+          path: /api/ready
+          port: 8080
+        initialDelaySeconds: 10  # Wait 10 seconds before first probe
+        periodSeconds: 5          # Check every 5 seconds
+        timeoutSeconds: 1         # Timeout after 1 second
+        successThreshold: 1      # 1 successful check = ready
+        failureThreshold: 3      # 3 failed checks = not ready
+```
+
+**Key Parameters:**
+
+- `httpGet.path` - The HTTP path to check (e.g., `/api/ready`, `/health`, `/ready`)
+- `httpGet.port` - The port number to connect to (can be a number or a named port)
+- `initialDelaySeconds` - Number of seconds to wait before the first probe (default: 0)
+- `periodSeconds` - How often to perform the probe (default: 10)
+- `timeoutSeconds` - Number of seconds after which the probe times out (default: 1)
+- `successThreshold` - Minimum consecutive successes for the probe to be considered successful (default: 1)
+- `failureThreshold` - Number of consecutive failures required to mark as not ready (default: 3)
+
+**Example Use Cases:**
+- Web applications with a dedicated health/readiness endpoint
+- REST APIs that expose a `/health` or `/ready` endpoint
+- Applications that need to verify they can serve HTTP requests
+
+#### TCP Socket Probe
+
+*The TCP Socket probe checks if a specific port is open and accepting connections. This is useful for applications that don't have an HTTP endpoint but need to verify network connectivity.*
+
+**Configuration:**
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: database-pod
+spec:
+  containers:
+    - name: mysql
+      image: mysql:8.0
+      ports:
+        - containerPort: 3306
+      readinessProbe:
+        tcpSocket:
+          port: 3306
+        initialDelaySeconds: 30
+        periodSeconds: 10
+        timeoutSeconds: 1
+        failureThreshold: 3
+```
+
+**Key Parameters:**
+
+- `tcpSocket.port` - The port number to check (can be a number or a named port)
+- Other parameters (`initialDelaySeconds`, `periodSeconds`, etc.) work the same as HTTP probes
+
+**Example Use Cases:**
+- Database containers (MySQL, PostgreSQL, MongoDB)
+- Services that use custom protocols (not HTTP)
+- Applications that only need to verify port availability
+
+#### Exec Command Probe
+
+*The Exec Command probe runs a command inside the container and checks if it exits successfully (exit code 0). This is the most flexible probe type but should be used carefully as it can be resource-intensive.*
+
+**Configuration:**
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: app-pod
+spec:
+  containers:
+    - name: app
+      image: myapp
+      readinessProbe:
+        exec:
+          command:
+            - cat
+            - /app/is_ready
+        initialDelaySeconds: 5
+        periodSeconds: 10
+        timeoutSeconds: 1
+        failureThreshold: 3
+```
+
+**Key Parameters:**
+
+- `exec.command` - Array of command and arguments to execute
+- The command must exit with code 0 for success
+- Other parameters work the same as other probe types
+
+**Example Use Cases:**
+- Checking if a file exists (e.g., `/app/is_ready`)
+- Running custom scripts that verify application state
+- Checking database connectivity with custom commands
+- Verifying configuration files are present
+
+**Best Practices for Readiness Probes:**
+
+1. **Always use readiness probes** for production applications that serve traffic
+2. **Set appropriate `initialDelaySeconds`** to allow applications time to start
+3. **Keep `periodSeconds` reasonable** (5-10 seconds is typical) to balance responsiveness and load
+4. **Use HTTP probes** when possible - they're more efficient than exec probes
+5. **Create dedicated health endpoints** (`/health`, `/ready`, `/api/ready`) that are lightweight and fast
+6. **Don't check dependencies** in readiness probes - only check if the application itself is ready
+7. **Set `failureThreshold`** appropriately - too low might cause flapping, too high delays detection
+
+### Liveness Probes
+
+#### Liveness Probes Overview {#liveness-probes-overview}
+
+*A liveness probe determines if a container is still alive and running correctly. If the liveness probe fails, Kubernetes kills the container and restarts it according to the Pod's restart policy.*
+
+**Why Liveness Probes Are Needed:**
+
+What if a Pod is ready (readiness probe passes) but the application running inside has a bug and is crashing or hanging? Users won't get proper responses, but Kubernetes won't know there's a problem because:
+- The container process is still running (or appears to be)
+- The readiness probe might still pass (if it's not checking the right thing)
+- Kubernetes won't automatically restart the container
+
+**How Liveness Probes Work:**
+
+- Kubernetes periodically performs the liveness check (default: every 10 seconds)
+- If the probe succeeds, the container continues running
+- If the probe fails, Kubernetes **kills the container** and restarts it (according to restart policy)
+- The probe continues to run throughout the container's lifecycle
+- **Important:** A failed liveness probe **restarts the container**, unlike readiness probes which only remove from Service endpoints
+
+**Key Differences from Readiness Probes:**
+
+| Aspect | Readiness Probe | Liveness Probe |
+|--------|----------------|----------------|
+| **Purpose** | Is the Pod ready to receive traffic? | Is the container alive and healthy? |
+| **Action on Failure** | Remove from Service endpoints | Kill and restart container |
+| **When to Use** | When app needs time to initialize | When app can get into broken state |
+| **Frequency** | Should be frequent | Can be less frequent |
+
+**When to Use Liveness Probes:**
+
+- Applications that can deadlock or hang
+- Applications that might get into a broken state but continue running
+- Long-running processes that need automatic recovery
+- Applications where a restart can fix issues
+
+**When NOT to Use Liveness Probes:**
+
+- Applications that can't recover from restarts
+- Applications where restarts are expensive or disruptive
+- If the readiness probe is sufficient (most cases)
+
+**Three Types of Liveness Probes:**
+
+1. **HTTP Get Probe** - Performs an HTTP GET request to a specified path and port
+2. **TCP Socket Probe** - Checks if a specific port is open and accepting connections
+3. **Exec Command Probe** - Executes a command inside the container and checks if it exits successfully (exit code 0)
+
+#### HTTP Get Probe
+
+*The HTTP Get probe is the most common type of liveness probe. It makes an HTTP GET request to a specified endpoint and considers the container alive if the response status code is between 200 and 399.*
+
+**Configuration:**
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: webapp-pod
+  labels:
+    name: webapp
+spec:
+  containers:
+    - name: webapp
+      image: webapp:latest
+      ports:
+        - containerPort: 8080
+      livenessProbe:
+        httpGet:
+          path: /api/healthy
+          port: 8080
+        initialDelaySeconds: 10  # Wait 10 seconds before first probe
+        periodSeconds: 5          # Check every 5 seconds
+        timeoutSeconds: 1         # Timeout after 1 second
+        failureThreshold: 8      # 8 failed checks = restart container
+```
+
+**Key Parameters:**
+
+- `httpGet.path` - The HTTP path to check (e.g., `/api/healthy`, `/health`, `/liveness`)
+- `httpGet.port` - The port number to connect to (can be a number or a named port)
+- `initialDelaySeconds` - Number of seconds to wait before the first probe (default: 0)
+- `periodSeconds` - How often to perform the probe (default: 10)
+- `timeoutSeconds` - Number of seconds after which the probe times out (default: 1)
+- `successThreshold` - Minimum consecutive successes for the probe to be considered successful (default: 1)
+- `failureThreshold` - Number of consecutive failures required to restart the container (default: 3)
+
+**Example Use Cases:**
+- Web applications with a dedicated health/liveness endpoint
+- REST APIs that expose a `/health` or `/api/healthy` endpoint
+- Applications that need to verify they can still serve HTTP requests correctly
+
+#### TCP Socket Probe
+
+*The TCP Socket probe checks if a specific port is open and accepting connections. This is useful for applications that don't have an HTTP endpoint but need to verify the service is still responding.*
+
+**Configuration:**
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: database-pod
+spec:
+  containers:
+    - name: mysql
+      image: mysql:8.0
+      ports:
+        - containerPort: 3306
+      livenessProbe:
+        tcpSocket:
+          port: 3306
+        initialDelaySeconds: 30
+        periodSeconds: 10
+        timeoutSeconds: 1
+        failureThreshold: 3
+```
+
+**Key Parameters:**
+
+- `tcpSocket.port` - The port number to check (can be a number or a named port)
+- Other parameters (`initialDelaySeconds`, `periodSeconds`, etc.) work the same as HTTP probes
+
+**Example Use Cases:**
+- Database containers (MySQL, PostgreSQL, MongoDB, Redis)
+- Services that use custom protocols (not HTTP)
+- Applications that only need to verify port availability and service responsiveness
+
+#### Exec Command Probe
+
+*The Exec Command probe runs a command inside the container and checks if it exits successfully (exit code 0). This is the most flexible probe type but should be used carefully as it can be resource-intensive.*
+
+**Configuration:**
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: app-pod
+spec:
+  containers:
+    - name: app
+      image: myapp
+      livenessProbe:
+        exec:
+          command:
+            - cat
+            - /app/is_healthy
+        initialDelaySeconds: 30
+        periodSeconds: 10
+        timeoutSeconds: 1
+        failureThreshold: 3
+```
+
+**Key Parameters:**
+
+- `exec.command` - Array of command and arguments to execute
+- The command must exit with code 0 for success
+- Other parameters work the same as other probe types
+
+**Example Use Cases:**
+- Checking if a file exists (e.g., `/app/is_healthy`)
+- Running custom scripts that verify application health
+- Checking if a process is still running (e.g., `pgrep -f "myapp"`)
+- Verifying application state through custom commands
+
+**Combining Readiness and Liveness Probes:**
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: full-featured-app
+spec:
+  containers:
+    - name: app
+      image: myapp:latest
+      ports:
+        - containerPort: 8080
+      # Readiness: Check if app can serve traffic
+      readinessProbe:
+        httpGet:
+          path: /api/ready
+          port: 8080
+        initialDelaySeconds: 10
+        periodSeconds: 5
+        timeoutSeconds: 1
+        failureThreshold: 3
+      # Liveness: Check if app is still healthy
+      livenessProbe:
+        httpGet:
+          path: /api/healthy
+          port: 8080
+        initialDelaySeconds: 10
+        periodSeconds: 5
+        timeoutSeconds: 1
+        failureThreshold: 8
+```
+
+**Best Practices for Liveness Probes:**
+
+1. **Use different endpoints** for liveness vs readiness (e.g., `/health` for liveness, `/ready` for readiness)
+2. **Set `initialDelaySeconds` higher** than readiness probes to avoid premature restarts
+3. **Be careful with `failureThreshold`** - too low causes unnecessary restarts
+4. **Don't check external dependencies** in liveness probes (databases, APIs) - only check the app itself
+5. **Use HTTP probes** when possible - they're more reliable than exec probes
+6. **Consider startup probes** for slow-starting applications (Kubernetes 1.16+)
+7. **Monitor restart counts** - frequent restarts indicate a problem with the probe or application
+
+### Logging
+
+*Logging is a critical aspect of observability in Kubernetes. Understanding how to collect, view, and manage logs from containers is essential for debugging and monitoring applications.*
+
+**Viewing Pod Logs:**
+
+```bash
+# View logs from a pod (single container pod)
+kubectl logs <pod-name>
+
+# Follow logs in real-time (live streaming, like tail -f)
+kubectl logs -f <pod-name>
+
+# View logs from a specific container in a multi-container pod
+kubectl logs <pod-name> -c <container-name>
+
+# Follow logs from a specific container in a multi-container pod
+kubectl logs -f <pod-name> -c <container-name>
+
+# View logs from previous container instance (if container restarted)
+kubectl logs <pod-name> --previous
+
+# View logs with timestamps
+kubectl logs <pod-name> --timestamps
+
+# View last N lines
+kubectl logs <pod-name> --tail=100
+
+# View logs from all pods matching a label
+kubectl logs -l app=myapp
+```
+
+**The `-f` Flag (Follow/Live Logs):**
+
+The `-f` flag streams logs in real-time, similar to `tail -f` in Linux. This is useful for:
+- Monitoring application behavior as it happens
+- Debugging issues in real-time
+- Watching log output continuously
+
+**Example:**
+```bash
+# Stream logs live from a pod
+kubectl logs -f event-simulator-pod
+```
+
+**Multi-Container Pods:**
+
+When a Pod has multiple containers, you **must specify the container name** using the `-c` flag. If you don't specify a container name, kubectl will show an error because it doesn't know which container's logs to display.
+
+**Example Pod with Multiple Containers:**
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: event-simulator-pod
+spec:
+  containers:
+    - name: event-simulator
+      image: kodekloud/event-simulator
+    - name: image-processor
+      image: some-image-processor
+```
+
+**Viewing Logs from Multi-Container Pods:**
+
+```bash
+# View logs from the event-simulator container
+kubectl logs event-simulator-pod -c event-simulator
+
+# Follow logs from the event-simulator container (live streaming)
+kubectl logs -f event-simulator-pod -c event-simulator
+
+# View logs from the image-processor container
+kubectl logs event-simulator-pod -c image-processor
+
+# View logs from all containers in a multi-container pod
+kubectl logs event-simulator-pod --all-containers=true
+```
+
+**Key Points:**
+- **Single-container pods**: You can omit the container name
+- **Multi-container pods**: You **must** specify the container name with `-c <container-name>`
+- Use `-f` flag to stream logs in real-time (live logs)
+- Use `--all-containers=true` to view logs from all containers at once
+
+**Logging Best Practices:**
+
+1. **Write to stdout/stderr** - Kubernetes automatically captures logs from these streams
+2. **Use structured logging** (JSON format) for better parsing and analysis
+3. **Include timestamps** in log messages
+4. **Use appropriate log levels** (DEBUG, INFO, WARN, ERROR)
+5. **Don't log sensitive information** (passwords, tokens, PII)
+6. **Use log aggregation tools** (ELK, Loki, Fluentd) for production
+7. **Set log rotation** to prevent disk space issues
+
+**Example: Viewing Logs from a Pod:**
+
+```bash
+# Step 1: Create a pod from YAML
+kubectl create -f event-simulator.yaml
+
+# Step 2: View logs from the pod (single container)
+kubectl logs event-simulator-pod
+
+# Step 3: Follow logs in real-time (live streaming with -f flag)
+kubectl logs -f event-simulator-pod
+
+# For multi-container pods, specify the container name:
+kubectl logs -f event-simulator-pod -c event-simulator
+```
+
+**Example: Viewing Logs from a Deployment:**
+
+```bash
+# Get pod name from deployment
+kubectl get pods -l app=myapp
+
+# View logs from the pod
+kubectl logs <pod-name>
+
+# Follow logs in real-time
+kubectl logs -f <pod-name>
+
+# If deployment has multiple containers per pod, specify container name
+kubectl logs -f <pod-name> -c <container-name>
+
+# Or view logs from all pods in deployment
+kubectl logs -l app=myapp --all-containers=true
+```
+
+### Monitoring
+
+*Monitoring provides visibility into the health, performance, and resource usage of your Kubernetes cluster and applications. Effective monitoring helps identify issues before they impact users.*
+
+**Important Note:**
+- Kubernetes **does NOT come with monitoring solutions out of the box**
+- You need to install and configure monitoring tools separately
+- The most basic monitoring solution is **Metrics Server** - an in-memory solution for resource metrics
+
+**Metrics Server:**
+
+Metrics Server is a cluster-wide aggregator of resource usage data. It collects metrics from each node's Kubelet (which runs cAdvisor) and stores them in memory.
+
+**How Metrics Server Works:**
+
+1. **cAdvisor** - Runs on each node as part of Kubelet, collects container resource usage (CPU, memory, network, disk)
+2. **Kubelet** - Exposes metrics from cAdvisor via the Metrics API
+3. **Metrics Server** - Aggregates metrics from all nodes and provides them via the Kubernetes Metrics API
+4. **kubectl top** - Uses the Metrics API to display resource usage
+
+**Key Characteristics:**
+- **In-memory solution** - Metrics are stored in memory, not persisted to disk
+- **Short retention** - Metrics are only kept for a short period (typically 15 minutes)
+- **Lightweight** - Designed for quick resource usage queries
+- **Not for historical data** - For long-term monitoring, use Prometheus or other solutions
+
+**Key Metrics to Monitor:**
+
+1. **Pod Metrics:**
+   - CPU usage
+   - Memory usage
+   - Network I/O
+   - Disk I/O
+   - Restart counts
+
+2. **Application Metrics:**
+   - Request rate
+   - Error rate
+   - Response time
+   - Business metrics (orders, transactions, etc.)
+
+3. **Cluster Metrics:**
+   - Node health
+   - Resource utilization
+   - Pod scheduling
+   - API server performance
+
+**Basic Monitoring Commands (kubectl top):**
+
+The `kubectl top` command provides real-time resource usage information. It requires Metrics Server to be installed and running.
+
+```bash
+# View node resource usage (CPU and memory)
+kubectl top node
+
+# View node resource usage with more details
+kubectl top node --show-labels
+
+# View pod resource usage in current namespace
+kubectl top pod
+
+# View pod resource usage for all namespaces
+kubectl top pod --all-namespaces
+
+# View resource usage for a specific pod
+kubectl top pod <pod-name>
+
+# View resource usage for pods in a specific namespace
+kubectl top pod -n <namespace>
+
+# View resource usage for pods matching a label selector
+kubectl top pod -l app=myapp
+
+# View resource usage with container-level details
+kubectl top pod <pod-name> --containers
+
+# View pod metrics via Metrics API (requires metrics-server)
+kubectl get --raw /apis/metrics.k8s.io/v1beta1/namespaces/default/pods/<pod-name>
+```
+
+**Understanding kubectl top Output:**
+
+```bash
+# Example: kubectl top node
+NAME       CPU(cores)   CPU%   MEMORY(bytes)   MEMORY%
+node1      500m         25%    2Gi             50%
+node2      300m         15%    1.5Gi           37%
+
+# Example: kubectl top pod
+NAME           CPU(cores)   MEMORY(bytes)
+webapp-abc     100m         256Mi
+db-xyz         200m         512Mi
+```
+
+**Note:** If `kubectl top` commands fail, it usually means Metrics Server is not installed or not running properly.
+
+**Monitoring Tools:**
+
+1. **Metrics Server** - Core Kubernetes component for resource metrics
+2. **Prometheus** - Popular open-source monitoring and alerting toolkit
+3. **Grafana** - Visualization and dashboards for metrics
+4. **cAdvisor** - Container resource usage and performance metrics
+5. **kube-state-metrics** - Generates metrics about Kubernetes objects
+
+**Setting Up Basic Monitoring (Metrics Server):**
+
+Metrics Server is not installed by default in most Kubernetes distributions. You need to install it manually.
+
+```bash
+# Check if metrics-server is installed
+kubectl get deployment metrics-server -n kube-system
+
+# Check if metrics-server pod is running
+kubectl get pods -n kube-system | grep metrics-server
+
+# Install metrics-server (if not present)
+kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
+
+# Wait for metrics-server to be ready
+kubectl wait --for=condition=ready pod -l k8s-app=metrics-server -n kube-system --timeout=90s
+
+# Verify metrics-server is working
+kubectl top node
+kubectl top pod
+
+# If commands fail, check metrics-server logs
+kubectl logs -n kube-system -l k8s-app=metrics-server
+```
+
+**Troubleshooting Metrics Server:**
+
+If `kubectl top` commands return errors:
+
+```bash
+# Check if Metrics API is available
+kubectl get apiservice v1beta1.metrics.k8s.io
+
+# Check metrics-server pod status
+kubectl get pods -n kube-system -l k8s-app=metrics-server
+
+# Check metrics-server logs for errors
+kubectl logs -n kube-system -l k8s-app=metrics-server
+
+# Verify metrics-server can reach nodes
+kubectl describe pod -n kube-system -l k8s-app=metrics-server
+```
+
+**Important:** Metrics Server is an **in-memory solution** and does not store historical data. For production monitoring with historical data, alerts, and dashboards, consider installing:
+- **Prometheus** - For metrics collection and storage
+- **Grafana** - For visualization and dashboards
+- **Alertmanager** - For alerting
+
+**Monitoring Best Practices:**
+
+1. **Monitor at multiple levels** - cluster, node, pod, and application
+2. **Set up alerts** for critical metrics (CPU, memory, errors)
+3. **Use dashboards** to visualize trends and patterns
+4. **Monitor SLIs/SLOs** (Service Level Indicators/Objectives)
+5. **Track business metrics** alongside technical metrics
+6. **Set up log aggregation** alongside metrics
+7. **Use distributed tracing** for microservices architectures
+8. **Monitor costs** - track resource usage to optimize spending
+
+**Example: Monitoring Pod Health:**
+
+```bash
+# Check pod status
+kubectl get pods -o wide
+
+# Check pod conditions
+kubectl get pod <pod-name> -o jsonpath='{.status.conditions}'
+
+# Check resource usage
+kubectl top pod <pod-name>
+
+# Check events
+kubectl get events --sort-by='.lastTimestamp'
+
+# Check pod restarts
+kubectl get pods -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.containerStatuses[0].restartCount}{"\n"}{end}'
+```
+
+## Pod Design
+
+### Selectors and Labels
+
+*Labels and selectors are used to group different objects in a Kubernetes cluster based on their type, functionality, environment, or any other meaningful criteria.*
+
+**Labels:**
+- Key-value pairs attached to Kubernetes objects (pods, services, deployments, etc.)
+- Used to identify and organize resources
+- Examples: `app: App1`, `function: Front-end`, `env: production`, `tier: web`
+
+**Selectors:**
+- Used to find and select objects based on their labels
+- ReplicaSets use selectors to discover and manage the correct pods
+- Services use selectors to route traffic to matching pods
+
+**Example: ReplicaSet with Labels and Selectors**
+
+```yaml
+apiVersion: apps/v1
+kind: ReplicaSet
+metadata:
+  name: simple-webapp
+  labels:
+    app: App1
+    function: Front-end
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: App1
+  template:
+    metadata:
+      labels:
+        app: App1
+        function: Front-end
+    spec:
+      containers:
+      - name: simple-webapp
+        image: simple-webapp
+```
+
+**Key Points:**
+- The `selector.matchLabels` in ReplicaSet must match the `template.metadata.labels` in the pod template
+- ReplicaSet uses the selector to discover which pods it should manage
+- Only pods with matching labels are controlled by the ReplicaSet
+
+**Using Selectors with kubectl:**
+
+```bash
+# Get pods matching a label selector
+kubectl get pods --selector app=App1
+
+# Get pods with multiple label selectors
+kubectl get pods -l app=App1,function=Front-end
+
+# Get pods with label selector (shorthand)
+kubectl get pods -l app=App1
+```
+
+### Annotations
+
+*Annotations are key-value pairs used to store metadata about Kubernetes objects. Unlike labels, annotations are not used for selection or grouping.*
+
+**Common Use Cases:**
+- Build information (version, build number, git commit)
+- Deployment metadata (deployment tool, deployment date)
+- Contact information (team, owner)
+- Custom metadata for tools and controllers
+
+**Example: Pod with Annotations**
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: myapp-pod
+  labels:
+    app: myapp
+  annotations:
+    buildversion: "1.2.3"
+    deployment.kubernetes.io/revision: "1"
+    contact: "team@example.com"
+spec:
+  containers:
+  - name: myapp
+    image: myapp:1.2.3
+```
+
+**Key Differences: Labels vs Annotations**
+
+| Feature | Labels | Annotations |
+|---------|--------|-------------|
+| **Purpose** | Identify and select objects | Store metadata |
+| **Used for selection** | Yes | No |
+| **Size limit** | 63 characters (key/value) | No limit |
+| **Example** | `app: App1` | `buildversion: "1.2.3"` |
+
+**Viewing Annotations:**
+
+```bash
+# View annotations for a pod
+kubectl get pod <pod-name> -o jsonpath='{.metadata.annotations}'
+
+# View specific annotation
+kubectl get pod <pod-name> -o jsonpath='{.metadata.annotations.buildversion}'
+
+# Describe pod to see annotations
+kubectl describe pod <pod-name>
+```
+
+## Rolling Updates and Rollbacks
+
+### Rolling Updates
+
+*Rolling updates allow you to update a deployment gradually, replacing old pods with new ones one at a time, ensuring zero downtime.*
+
+**How Rolling Updates Work:**
+- Kubernetes creates new pods with the updated configuration
+- Gradually replaces old pods with new pods
+- Maintains service availability throughout the update
+- Old ReplicaSet is kept for potential rollback
+
+**Methods to Update a Deployment:**
+
+**1. Update using YAML file:**
+```bash
+# Edit the deployment-definition.yml file, then apply
+kubectl apply -f deployment-definition.yml
+```
+
+**2. Update image directly:**
+```bash
+# Update container image in deployment
+kubectl set image deployment/myapp-deployment nginx=nginx:1.9.1
+```
+
+**3. Edit deployment directly:**
+```bash
+# Open deployment in editor
+kubectl edit deployment/myapp-deployment
+```
+
+**Checking Update Status:**
+
+```bash
+# Get deployments
+kubectl get deployments
+
+# Check rollout status
+kubectl rollout status deployment/myapp-deployment
+
+# View rollout history
+kubectl rollout history deployment/myapp-deployment
+```
+
+**Rolling Update Strategy:**
+
+By default, Deployments use a rolling update strategy:
+- `maxSurge`: Maximum number of pods that can be created above desired replicas (default: 25%)
+- `maxUnavailable`: Maximum number of pods that can be unavailable during update (default: 25%)
+
+**Example:**
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: myapp-deployment
+spec:
+  replicas: 4
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 1
+  template:
+    # ... pod template
+```
+
+### Rollbacks
+
+*Rollbacks allow you to revert a deployment to a previous revision if an update causes issues.*
+
+**Rollback Commands:**
+
+```bash
+# Rollback to previous revision
+kubectl rollout undo deployment/myapp-deployment
+
+# Rollback to specific revision
+kubectl rollout undo deployment/myapp-deployment --to-revision=2
+
+# View rollout history with details
+kubectl rollout history deployment/myapp-deployment
+
+# View details of specific revision
+kubectl rollout history deployment/myapp-deployment --revision=2
+```
+
+**Key Points:**
+- Kubernetes maintains a history of all deployments
+- Each update creates a new revision
+- Rollback is instant and maintains zero downtime
+- Old ReplicaSets are kept for rollback purposes
+
+**Example Workflow:**
+
+```bash
+# 1. Create deployment
+kubectl create -f deployment-definition.yml
+
+# 2. Update deployment (change image)
+kubectl set image deployment/myapp-deployment nginx=nginx:1.9.1
+
+# 3. Check status
+kubectl rollout status deployment/myapp-deployment
+
+# 4. View history
+kubectl rollout history deployment/myapp-deployment
+
+# 5. If issues occur, rollback
+kubectl rollout undo deployment/myapp-deployment
+
+# 6. Verify rollback
+kubectl get deployment/myapp-deployment
+kubectl rollout status deployment/myapp-deployment
+```
